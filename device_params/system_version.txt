@@ -1,0 +1,25 @@
+Windows 10 Pro 19041
+Windows 10 Pro 19042
+Windows 10 Pro 19043
+Windows 10 Pro 19044
+Windows 10 Pro 19045
+Windows 10 Home 19041
+Windows 10 Home 19044
+Windows 10 Home 19045
+Windows 10 Enterprise 19044
+Windows 10 Enterprise 19045
+Windows 11 Pro 22000
+Windows 11 Pro 22621
+Windows 11 Pro 22631
+Windows 11 Pro 23000
+Windows 11 Home 22000
+Windows 11 Home 22621
+Windows 11 Home 22631
+Windows 11 Enterprise 22621
+Windows 11 Enterprise 22631
+Windows 11 Pro 26040
+Windows 10 Education 19045
+Windows 11 Education 22621
+Windows 10 Pro Workstation 19045
+Windows 11 Pro Workstation 22631
+Windows 11 Pro 25000

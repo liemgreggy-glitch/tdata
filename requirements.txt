@@ -1,0 +1,38 @@
+# Telegram Bot Framework
+python-telegram-bot==13.15
+
+# Telegram Client Library
+telethon>=1.24.0
+
+# Tdata-Session Conversion Library
+opentele>=1.15.0
+
+# Proxy Support (Optional)
+PySocks>=1.7.1
+
+# Additional Dependencies
+asyncio-throttle>=1.0.2
+
+
+# 核心 Web/API
+Flask>=2.2,<3.1
+python-dotenv>=1.0.1
+
+# Telegram 监听（Telethon）
+Telethon>=1.34,<1.38
+
+# 支持从 Telegram Desktop 的 tdata 转为 Telethon 会话
+opentele>=1.15,<2.0
+pycryptodome>=3.19
+lz4>=4.3.3
+
+# Python 3.8/3.9 补充（更好的类型兼容）
+typing_extensions>=4.12.2; python_version < "3.11"
+
+# 性能优化（可选，但放在必装里不影响）
+cryptg>=0.4.0; platform_python_implementation == "CPython"
+
+phonenumbers>=8.13.0
+
+# 随机数据生成（用于生成本地化姓名和简介）
+Faker>=39.0.0

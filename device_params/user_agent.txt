@@ -1,0 +1,15 @@
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101
+Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36
+Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/119.0.0.0
+Mozilla/5.0 (Windows NT 11.0; Win64; x64) Chrome/121.0.0.0
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/120.0
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) Firefox/121.0
+Mozilla/5.0 (Windows NT 11.0; Win64; x64) Firefox/122.0
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edge/120.0.0.0
+Mozilla/5.0 (Windows NT 11.0; Win64; x64) Edge/121.0.0.0
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) Safari/537.36
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) Opera/105.0.0.0
+Mozilla/5.0 (Windows NT 11.0; Win64; x64) Opera/106.0.0.0

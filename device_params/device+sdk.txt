@@ -1,0 +1,20 @@
+PC 64bit:Windows 10
+PC 64bit:Windows 11
+PC 64bit:Windows 10 Pro
+PC 64bit:Windows 11 Pro
+Desktop:Windows 10
+Desktop:Windows 11
+Workstation:Windows 10
+Workstation:Windows 11
+Gaming-PC:Windows 10
+Gaming-PC:Windows 11
+Office-PC:Windows 10 Pro
+Office-PC:Windows 11 Pro
+Home-PC:Windows 10 Home
+Home-PC:Windows 11 Home
+Studio-PC:Windows 10 Pro
+Studio-PC:Windows 11 Pro
+Dev-PC:Windows 10 Pro
+Dev-PC:Windows 11 Pro
+Media-PC:Windows 10
+Media-PC:Windows 11
