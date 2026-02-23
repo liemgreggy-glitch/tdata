@@ -5207,7 +5207,8 @@ class FileProcessor:
 
         # 收集所有检测任务，以便最终等待
         check_tasks: List[asyncio.Task] = []
-        processed = 0
+        processed = 0      # 最终完成数（转换失败 + 检测完成）
+        convert_done = 0   # 转换尝试完成数（用于转换阶段的进度显示）
 
         print(f"\n{'='*60}")
         print(f"🚀 [流水线] 启动：{total} 个TData，转换并发={TDATA_PIPELINE_CONVERT_CONCURRENT}，检测并发={TDATA_PIPELINE_CHECK_CONCURRENT}")
@@ -5247,7 +5248,7 @@ class FileProcessor:
                 logger.warning(f"清理临时Session文件失败: {e}")
 
         async def convert_one(index: int, tdata_path: str, tdata_name: str):
-            nonlocal processed, last_update_time
+            nonlocal processed, last_update_time, convert_done
             session_file = None
             error = None
             async with convert_semaphore:
@@ -5288,12 +5289,15 @@ class FileProcessor:
                 # 转换失败：直接记录错误，并计入进度
                 results["连接错误"].append((tdata_path, tdata_name, error or "TData转换失败"))
                 processed += 1
-                current_time = time.time()
-                if update_callback and ((current_time - last_update_time >= 3) or (processed % 10 == 0) or (processed == total)):
-                    elapsed = current_time - start_time
-                    speed = processed / elapsed if elapsed > 0 else 0
-                    await update_callback(processed, total, results, speed, elapsed)
-                    last_update_time = current_time
+
+            # 无论转换成功还是失败，都更新进度回调，让用户看到实时进展
+            convert_done += 1
+            current_time = time.time()
+            if update_callback and ((current_time - last_update_time >= 3) or (convert_done % 10 == 0) or (convert_done == total)):
+                elapsed = current_time - start_time
+                speed = convert_done / elapsed if elapsed > 0 else 0
+                await update_callback(convert_done, total, results, speed, elapsed)
+                last_update_time = current_time
 
         # 并发执行所有转换任务；每个转换完成后立即异步提交检测任务
         await asyncio.gather(*[convert_one(i, fp, fn) for i, (fp, fn) in enumerate(files)], return_exceptions=True)
