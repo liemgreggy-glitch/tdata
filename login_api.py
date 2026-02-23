@@ -7,6 +7,7 @@ Provides web interface and API endpoints for viewing login codes
 
 import os
 import asyncio
+import json
 import secrets
 import re
 from datetime import datetime, timedelta, timezone
@@ -56,6 +57,7 @@ class AccountContext:
     last_code_at: Optional[datetime] = None
     new_code_event: asyncio.Event = field(default_factory=asyncio.Event)
     is_connected: bool = False
+    _connect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class LoginApiService:
@@ -86,6 +88,7 @@ class LoginApiService:
         app.router.add_get('/login/{token}', self.handle_login_page)
         app.router.add_get('/api/v1/info/{token}', self.handle_api_info)
         app.router.add_get('/api/v1/code/{token}', self.handle_api_code)
+        app.router.add_get('/api/v1/stream/{token}', self.handle_sse_stream)
         app.router.add_get('/healthz', self.handle_healthz)
         return app
     
@@ -157,62 +160,69 @@ class LoginApiService:
     
     async def _ensure_connected(self, account: AccountContext):
         """确保账号已连接到 Telegram"""
-        if account.is_connected and account.client:
-            return
-        
-        if not TELETHON_AVAILABLE:
-            return
-        
-        try:
-            # 创建客户端
-            account.client = TelegramClient(
-                account.session_path,
-                int(account.api_id),
-                str(account.api_hash)
-            )
-            
-            await account.client.connect()
-            
-            # 检查是否已授权
-            if not await account.client.is_user_authorized():
-                account.is_connected = False
+        async with account._connect_lock:
+            if account.is_connected and account.client:
                 return
             
-            account.is_connected = True
+            if not TELETHON_AVAILABLE:
+                return
             
-            # 检查 2FA 状态
             try:
-                password = await account.client(GetPasswordRequest())
-                account.has_2fa = password.has_password if hasattr(password, 'has_password') else False
-            except Exception as e:
-                print(f"⚠️ 检查 2FA 状态失败 {account.phone}: {e}")
-                account.has_2fa = None
-            
-            # 订阅 777000 消息
-            @account.client.on(events.NewMessage(chats=[777000]))
-            async def code_handler(event):
-                code = self._extract_code(event.message.message)
-                if code:
-                    account.last_code = code
-                    account.last_code_at = datetime.now(BEIJING_TZ)
-                    account.new_code_event.set()
-                    account.new_code_event.clear()
-                    print(f"📥 收到验证码 {account.phone}: {code}")
-            
-            # 获取最近的验证码
-            try:
-                messages = await account.client.get_messages(777000, limit=1)
-                if messages:
-                    code = self._extract_code(messages[0].message)
+                # 创建客户端
+                account.client = TelegramClient(
+                    account.session_path,
+                    int(account.api_id),
+                    str(account.api_hash)
+                )
+                
+                await account.client.connect()
+                
+                # 检查是否已授权
+                if not await account.client.is_user_authorized():
+                    account.is_connected = False
+                    return
+                
+                account.is_connected = True
+                
+                # 检查 2FA 状态
+                try:
+                    password = await account.client(GetPasswordRequest())
+                    account.has_2fa = password.has_password if hasattr(password, 'has_password') else False
+                except Exception as e:
+                    print(f"⚠️ 检查 2FA 状态失败 {account.phone}: {e}")
+                    account.has_2fa = None
+                
+                # 订阅 777000 消息
+                @account.client.on(events.NewMessage(chats=[777000]))
+                async def code_handler(event):
+                    code = self._extract_code(event.message.message)
                     if code:
                         account.last_code = code
-                        account.last_code_at = messages[0].date
+                        account.last_code_at = datetime.now(timezone.utc)
+                        account.new_code_event.set()
+                        await asyncio.sleep(0)
+                        account.new_code_event.clear()
+                        print(f"📥 收到验证码 {account.phone}: {code}")
+                
+                # 获取最近的验证码
+                try:
+                    messages = await account.client.get_messages(777000, limit=5)
+                    for msg in messages:
+                        code = self._extract_code(msg.message or "")
+                        if code:
+                            account.last_code = code
+                            msg_time = msg.date
+                            if msg_time and msg_time.tzinfo is None:
+                                # Telethon returns UTC timestamps as naive datetimes; make them UTC-aware
+                                msg_time = msg_time.replace(tzinfo=timezone.utc)
+                            account.last_code_at = msg_time
+                            break
+                except Exception as e:
+                    print(f"⚠️ 获取历史消息失败 {account.phone}: {e}")
+                
             except Exception as e:
-                print(f"⚠️ 获取历史消息失败 {account.phone}: {e}")
-            
-        except Exception as e:
-            print(f"❌ 连接失败 {account.phone}: {e}")
-            account.is_connected = False
+                print(f"❌ 连接失败 {account.phone}: {e}")
+                account.is_connected = False
     
     def _extract_code(self, text: str) -> Optional[str]:
         """从消息文本中提取 5-6 位验证码"""
@@ -229,8 +239,7 @@ class LoginApiService:
             return web.Response(text="Invalid token", status=404)
         
         # 确保已连接
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(self._ensure_connected(account), self._loop)
+        await self._ensure_connected(account)
         
         # 生成 HTML
         html = self._generate_login_page_html(account)
@@ -245,8 +254,7 @@ class LoginApiService:
             return web.json_response({'error': 'Invalid token'}, status=404)
         
         # 确保已连接
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(self._ensure_connected(account), self._loop)
+        await self._ensure_connected(account)
         
         return web.json_response({
             'phone': account.phone,
@@ -264,8 +272,7 @@ class LoginApiService:
             return web.json_response({'error': 'Invalid token'}, status=404)
         
         # 确保已连接
-        if self._loop:
-            asyncio.run_coroutine_threadsafe(self._ensure_connected(account), self._loop)
+        await self._ensure_connected(account)
         
         # 获取 wait 参数（长轮询秒数）
         wait = int(request.query.get('wait', '0'))
@@ -283,6 +290,52 @@ class LoginApiService:
             'last_code_at': account.last_code_at.isoformat() if account.last_code_at else None
         })
     
+    async def handle_sse_stream(self, request: web.Request) -> web.StreamResponse:
+        """Server-Sent Events 接口，实时推送验证码"""
+        token = request.match_info['token']
+        account = self.accounts.get(token)
+        if not account:
+            return web.Response(text="Invalid token", status=404)
+
+        await self._ensure_connected(account)
+
+        response = web.StreamResponse()
+        response.headers['Content-Type'] = 'text/event-stream'
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['Connection'] = 'keep-alive'
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        await response.prepare(request)
+
+        # 先推送当前已有的验证码
+        if account.last_code:
+            data = json.dumps({
+                'code': account.last_code,
+                'time': account.last_code_at.astimezone(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S') if account.last_code_at else ''
+            })
+            await response.write(f"data: {data}\n\n".encode())
+
+        last_sent_code = account.last_code
+        try:
+            while not request.transport.is_closing():
+                try:
+                    # Wait up to 25s for a new code; on timeout send a heartbeat to keep the connection alive
+                    await asyncio.wait_for(account.new_code_event.wait(), timeout=25)
+                except asyncio.TimeoutError:
+                    await response.write(b": heartbeat\n\n")
+                    continue
+
+                if account.last_code and account.last_code != last_sent_code:
+                    last_sent_code = account.last_code
+                    data = json.dumps({
+                        'code': account.last_code,
+                        'time': account.last_code_at.astimezone(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S') if account.last_code_at else ''
+                    })
+                    await response.write(f"data: {data}\n\n".encode())
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+
+        return response
+
     async def handle_healthz(self, request: web.Request) -> web.Response:
         """健康检查"""
         return web.Response(text="OK", status=200)
@@ -295,7 +348,7 @@ class LoginApiService:
         # 判断是否有最近的验证码（30分钟内）
         has_recent_code = False
         if account.last_code_at:
-            age = datetime.now(BEIJING_TZ) - account.last_code_at
+            age = datetime.now(timezone.utc) - account.last_code_at
             has_recent_code = (age.total_seconds() / 60) <= 30
         
         # 解析手机号：拆分国家代码和号码
@@ -325,24 +378,24 @@ class LoginApiService:
         # 验证码区域
         if has_recent_code and account.last_code:
             code_value = account.last_code
-            code_time = account.last_code_at.strftime('%Y-%m-%d %H:%M:%S')
+            code_time = account.last_code_at.astimezone(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
             code_section = f'''
                 <div class="group">
                     <div class="label">登录验证码</div>
                     <div class="row">
-                        <span class="val code">{code_value}</span>
-                        <button class="cbtn" onclick="cp('{code_value}',this)">复制</button>
+                        <span id="code-val" class="val code">{code_value}</span>
+                        <button class="cbtn" id="code-copy-btn" onclick="cp('{code_value}',this)">复制</button>
                     </div>
-                    <div class="hint">收到于: {code_time}</div>
+                    <div class="hint" id="code-time">收到于: {code_time}</div>
                 </div>'''
         else:
             code_section = '''
                 <div class="group">
                     <div class="label">登录验证码</div>
                     <div class="row">
-                        <span class="val wait">等待验证码...</span>
+                        <span id="code-val" class="val wait">等待验证码...</span>
                     </div>
-                    <div class="hint">请从 Telegram 客户端触发登录</div>
+                    <div class="hint" id="code-time">请从 Telegram 客户端触发登录</div>
                 </div>'''
         
         # 2FA区域
@@ -483,14 +536,23 @@ function cp(t,b){{
         document.body.removeChild(a);
     }});
 }}
-setInterval(()=>{{
-    fetch('/api/v1/code/{account.token}?wait=5')
-        .then(r=>r.json())
-        .then(d=>{{
-            if(d.last_code&&d.last_code!=="{account.last_code or ''}")location.reload();
-        }})
-        .catch(e=>console.error('Poll error:',e));
-}},5000);
+var evtSource=new EventSource('/api/v1/stream/{account.token}');
+evtSource.onmessage=function(e){{
+    var d=JSON.parse(e.data);
+    if(d.code){{
+        var cv=document.getElementById('code-val');
+        var ct=document.getElementById('code-time');
+        var cb=document.getElementById('code-copy-btn');
+        cv.textContent=d.code;
+        cv.className='val code';
+        if(ct)ct.textContent='收到于: '+d.time;
+        if(cb){{cb.onclick=function(){{cp(d.code,cb)}};}}
+    }}
+}};
+evtSource.onerror=function(){{
+    console.error('SSE connection error, browser will auto-reconnect');
+}};
+window.addEventListener('beforeunload',function(){{evtSource.close();}});
 </script>
 </body>
 </html>"""
