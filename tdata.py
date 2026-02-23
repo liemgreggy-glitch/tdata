@@ -93,6 +93,11 @@ TDATA_CONVERT_TIMEOUT = 30  # TData 转换超时（秒）
 CLEANUP_SINGLE_ACCOUNT_TIMEOUT = 300  # 单个账号清理超时（秒），防止卡死
 CLEANUP_OPERATION_TIMEOUT = 60  # 单个清理操作超时（秒），如删除联系人、退出群组等
 
+# TData两阶段流水线配置
+TDATA_PIPELINE_CONVERT_CONCURRENT = 50  # 阶段1：TData转Session并发数（纯本地操作）
+TDATA_PIPELINE_CHECK_CONCURRENT = 50    # 阶段2：SpamBot检测并发数
+TDATA_PIPELINE_CONVERT_TIMEOUT = 30     # 单个TData转换超时（秒）
+
 # 进度更新配置（防止触发 Telegram 限流）
 PROGRESS_UPDATE_INTERVAL = 10  # 进度更新最小间隔（秒）
 PROGRESS_UPDATE_MIN_PERCENT = 2  # 最小百分比变化才更新（用于中等批量）
@@ -5081,6 +5086,14 @@ class FileProcessor:
     
     async def check_accounts_with_realtime_updates(self, files: List[Tuple[str, str]], file_type: str, update_callback) -> Dict[str, List[Tuple[str, str, str]]]:
         """实时更新检查"""
+
+        # TData类型使用两阶段流水线（更高并发，速度接近Session）
+        if file_type == "tdata":
+            async def pipeline_callback(done, total, results, speed, elapsed, stage=None):
+                if update_callback:
+                    await update_callback(done, total, results, speed, elapsed)
+            return await self.check_tdata_accounts_pipeline(files, pipeline_callback)
+
         results = {
             "无限制": [],
             "垃圾邮件": [],
@@ -5168,7 +5181,149 @@ class FileProcessor:
             await asyncio.gather(*tasks, return_exceptions=True)
         
         return results
-    
+
+    async def check_tdata_accounts_pipeline(self, files: List[Tuple[str, str]], update_callback) -> Dict[str, List[Tuple[str, str, str]]]:
+        """两阶段流水线：阶段1批量转换TData→Session，阶段2并发SpamBot检测"""
+        results = {
+            "无限制": [],
+            "垃圾邮件": [],
+            "冻结": [],
+            "封禁": [],
+            "连接错误": []
+        }
+
+        status_mapping = {
+            "临时限制": "垃圾邮件",
+            "等待验证": "封禁",
+            "无响应": "连接错误",
+        }
+
+        total = len(files)
+        start_time = time.time()
+        last_update_time = 0
+
+        # 阶段1：并发转换所有TData → Session（纯本地操作）
+        print(f"\n{'='*60}")
+        print(f"🔄 [阶段1] 开始批量TData→Session转换，共 {total} 个，并发数 {TDATA_PIPELINE_CONVERT_CONCURRENT}")
+        print(f"{'='*60}")
+
+        convert_semaphore = asyncio.Semaphore(TDATA_PIPELINE_CONVERT_CONCURRENT)
+        # conversion_results: list of (tdata_path, tdata_name, session_path_or_None, error_or_None)
+        conversion_results: List[Tuple[str, str, Optional[str], Optional[str]]] = [None] * total
+        converted_count = 0
+
+        async def convert_one(index: int, tdata_path: str, tdata_name: str):
+            nonlocal converted_count, last_update_time
+            session_path = None
+            error = None
+            async with convert_semaphore:
+                if not OPENTELE_AVAILABLE:
+                    error = "opentele库未安装，无法转换TData"
+                else:
+                    try:
+                        tdesk = TDesktop(tdata_path)
+                        if not tdesk.isLoaded():
+                            error = "TData未授权或无效"
+                        else:
+                            os.makedirs(config.SESSIONS_BAK_DIR, exist_ok=True)
+                            temp_session_name = f"tdata_pipe_{time.time_ns()}_{index}"
+                            temp_session_path = os.path.join(config.SESSIONS_BAK_DIR, temp_session_name)
+                            temp_client = await asyncio.wait_for(
+                                tdesk.ToTelethon(session=temp_session_path, flag=UseCurrentSession, api=API.TelegramDesktop),
+                                timeout=TDATA_PIPELINE_CONVERT_TIMEOUT
+                            )
+                            await temp_client.disconnect()
+                            session_file = f"{temp_session_path}.session"
+                            if os.path.exists(session_file):
+                                session_path = session_file
+                                print(f"✅ [阶段1] [{tdata_name}] 转换完成")
+                            else:
+                                error = "Session转换失败：文件未生成"
+                    except asyncio.TimeoutError:
+                        error = f"TData转换超时（{TDATA_PIPELINE_CONVERT_TIMEOUT}秒）"
+                        print(f"⏱️ [阶段1] [{tdata_name}] {error}")
+                    except Exception as e:
+                        error = f"TData转换失败: {str(e)[:50]}"
+                        print(f"❌ [阶段1] [{tdata_name}] {error}")
+
+            conversion_results[index] = (tdata_path, tdata_name, session_path, error)
+            converted_count_local = sum(1 for r in conversion_results if r is not None)
+            converted_count = converted_count_local
+            current_time = time.time()
+            if update_callback and ((current_time - last_update_time >= 3) or (converted_count % 10 == 0) or (converted_count == total)):
+                elapsed = current_time - start_time
+                speed = converted_count / elapsed if elapsed > 0 else 0
+                await update_callback(converted_count, total, results, speed, elapsed, stage=1)
+                last_update_time = current_time
+
+        phase1_tasks = [convert_one(i, fp, fn) for i, (fp, fn) in enumerate(files)]
+        await asyncio.gather(*phase1_tasks, return_exceptions=True)
+
+        phase1_success = [(r[0], r[1], r[2]) for r in conversion_results if r is not None and r[2] is not None]
+        phase1_failed = [(r[0], r[1], r[3]) for r in conversion_results if r is not None and r[2] is None]
+
+        print(f"\n{'='*60}")
+        print(f"📊 [阶段1] 转换完成：成功 {len(phase1_success)}，失败 {len(phase1_failed)}")
+        print(f"{'='*60}")
+
+        # 将阶段1失败的直接标记为错误
+        for tdata_path, tdata_name, error in phase1_failed:
+            results["连接错误"].append((tdata_path, tdata_name, error or "TData转换失败"))
+
+        # 阶段2：用转换好的Session进行SpamBot检测（并发50）
+        print(f"\n{'='*60}")
+        print(f"🔍 [阶段2] 开始SpamBot检测，共 {len(phase1_success)} 个，并发数 {TDATA_PIPELINE_CHECK_CONCURRENT}")
+        print(f"{'='*60}")
+
+        check_semaphore = asyncio.Semaphore(TDATA_PIPELINE_CHECK_CONCURRENT)
+        checked_count = 0
+        last_update_time = time.time()
+
+        async def check_one(tdata_path: str, tdata_name: str, session_file: str):
+            nonlocal checked_count, last_update_time
+            async with check_semaphore:
+                try:
+                    status, info, account_name = await self.checker.check_account_status(session_file, tdata_name, self.db)
+                    mapped_status = status_mapping.get(status, status)
+                    if mapped_status not in results:
+                        print(f"⚠️ [阶段2] 未知状态 '{mapped_status}'，归类为连接错误: {tdata_name}")
+                        mapped_status = "连接错误"
+                    results[mapped_status].append((tdata_path, tdata_name, info))
+                    print(f"✅ [阶段2] [{tdata_name}] -> {mapped_status}")
+                except Exception as e:
+                    results["连接错误"].append((tdata_path, tdata_name, f"异常: {str(e)[:20]}"))
+                    print(f"❌ [阶段2] [{tdata_name}] -> 异常: {str(e)[:50]}")
+
+            checked = sum(len(v) for v in results.values()) - len(phase1_failed)
+            checked_count = checked
+            current_time = time.time()
+            if update_callback and ((current_time - last_update_time >= 3) or (checked % 10 == 0) or (checked == total)):
+                elapsed = current_time - start_time
+                speed = checked / elapsed if elapsed > 0 else 0
+                await update_callback(checked, total, results, speed, elapsed, stage=2)
+                last_update_time = current_time
+
+        phase2_tasks = [check_one(tdata_path, tdata_name, session_file) for tdata_path, tdata_name, session_file in phase1_success]
+        await asyncio.gather(*phase2_tasks, return_exceptions=True)
+
+        # 清理阶段1生成的临时Session文件
+        print(f"\n🧹 清理临时Session文件...")
+        for _, _, session_file in phase1_success:
+            try:
+                if os.path.exists(session_file):
+                    os.remove(session_file)
+                journal = session_file + "-journal"
+                if os.path.exists(journal):
+                    os.remove(journal)
+            except Exception as e:
+                logger.warning(f"清理临时Session文件失败: {e}")
+
+        print(f"\n{'='*60}")
+        print(f"🏁 [流水线] 全部完成：{total} 个TData账号检测完毕")
+        print(f"{'='*60}\n")
+
+        return results
+
     async def check_tdata_structure_async(self, tdata_path: str, tdata_name: str) -> Tuple[str, str, str]:
         """异步TData检查（已废弃，保留向后兼容）"""
         try:
