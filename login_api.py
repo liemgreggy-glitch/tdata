@@ -288,387 +288,210 @@ class LoginApiService:
         return web.Response(text="OK", status=200)
     
     def _generate_login_page_html(self, account: AccountContext) -> str:
-        """生成登录页面 HTML，匹配截图风格"""
+        """生成登录页面 HTML - 简洁卡片风格"""
         
-        # 品牌配置（可自定义）
-        brand_name = "PVBOT"
         brand_handle = "@PvBot"
         
         # 判断是否有最近的验证码（30分钟内）
         has_recent_code = False
-        code_age_minutes = 999
         if account.last_code_at:
             age = datetime.now(BEIJING_TZ) - account.last_code_at
-            code_age_minutes = age.total_seconds() / 60
-            has_recent_code = code_age_minutes <= 30
+            has_recent_code = (age.total_seconds() / 60) <= 30
         
-        # 2FA 状态
-        twofa_status = "✅ Enabled" if account.has_2fa else "❌ Disabled"
-        if account.has_2fa is None:
-            twofa_status = "⚠️ Unknown"
+        # 解析手机号：拆分国家代码和号码
+        phone = account.phone or ""
+        country_code = ""
+        national_number = phone
+        try:
+            import phonenumbers
+            p = phone if phone.startswith('+') else '+' + phone
+            parsed = phonenumbers.parse(p, None)
+            country_code = f"+{parsed.country_code}"
+            national_number = str(parsed.national_number)
+        except Exception:
+            if phone.startswith('+'):
+                for i in [3, 2, 1]:
+                    if len(phone) > i + 4:
+                        country_code = phone[:i+1]
+                        national_number = phone[i+1:]
+                        break
         
-        # 验证码显示
-        if has_recent_code and account.last_code:
-            code_display = f'<div class="code-digits">{account.last_code}</div>'
-            code_time_str = account.last_code_at.strftime('%Y-%m-%d %H:%M:%S')
-            time_display = f'<div class="code-time">Received at {code_time_str}</div>'
+        # 状态标签
+        if account.is_connected:
+            status_html = '<span class="tag normal">正常</span>'
         else:
-            code_display = '<div class="no-code-block">'
-            code_display += '<p class="no-code-zh">过去30分钟内没有登录消息</p>'
-            code_display += '<p class="no-code-en">No login message in the past 30 minutes</p>'
-            code_display += '</div>'
-            time_display = ''
+            status_html = '<span class="tag offline">离线</span>'
+        
+        # 验证码区域
+        if has_recent_code and account.last_code:
+            code_value = account.last_code
+            code_time = account.last_code_at.strftime('%Y-%m-%d %H:%M:%S')
+            code_section = f'''
+                <div class="group">
+                    <div class="label">登录验证码</div>
+                    <div class="row">
+                        <span class="val code">{code_value}</span>
+                        <button class="cbtn" onclick="cp('{code_value}',this)">复制</button>
+                    </div>
+                    <div class="hint">收到于: {code_time}</div>
+                </div>'''
+        else:
+            code_section = '''
+                <div class="group">
+                    <div class="label">登录验证码</div>
+                    <div class="row">
+                        <span class="val wait">等待验证码...</span>
+                    </div>
+                    <div class="hint">请从 Telegram 客户端触发登录</div>
+                </div>'''
+        
+        # 2FA区域
+        twofa_section = ""
+        if account.has_2fa:
+            twofa_section = '''
+                <div class="group">
+                    <div class="label">两步验证 (2FA) 密码</div>
+                    <div class="row">
+                        <span class="val code">••••</span>
+                        <button class="cbtn" onclick="cp('',this)">复制</button>
+                    </div>
+                </div>'''
         
         html = f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Telegram Login API - {account.phone}</title>
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }}
-        
-        .container {{
-            display: flex;
-            max-width: 1000px;
-            width: 100%;
-            min-height: 500px;
-            background: white;
-            border-radius: 16px;
-            overflow: hidden;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-        }}
-        
-        /* 左侧红色面板 */
-        .left-panel {{
-            background: linear-gradient(180deg, #e74c3c 0%, #c0392b 100%);
-            color: white;
-            padding: 40px 30px;
-            width: 320px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            position: relative;
-        }}
-        
-        .logo {{
-            font-size: 48px;
-            font-weight: bold;
-            margin-bottom: 20px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
-        }}
-        
-        .left-title {{
-            font-size: 24px;
-            font-weight: 600;
-            margin-bottom: 10px;
-            text-align: center;
-        }}
-        
-        .left-subtitle {{
-            font-size: 14px;
-            text-align: center;
-            line-height: 1.6;
-            opacity: 0.9;
-            margin-bottom: 40px;
-        }}
-        
-        /* 信封图标和徽章 */
-        .envelope-container {{
-            position: relative;
-            margin-top: auto;
-        }}
-        
-        .envelope-icon {{
-            width: 80px;
-            height: 80px;
-        }}
-        
-        .badge {{
-            position: absolute;
-            top: -8px;
-            right: -8px;
-            background: #ff4444;
-            color: white;
-            border-radius: 50%;
-            width: 28px;
-            height: 28px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            font-size: 16px;
-            border: 3px solid white;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        }}
-        
-        /* 右侧内容区 */
-        .right-panel {{
-            flex: 1;
-            padding: 40px;
-            display: flex;
-            flex-direction: column;
-        }}
-        
-        .header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 30px;
-        }}
-        
-        .phone-display {{
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 20px;
-            font-weight: 600;
-            color: #2c3e50;
-        }}
-        
-        .copy-btn {{
-            background: #3498db;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: background 0.2s;
-        }}
-        
-        .copy-btn:hover {{
-            background: #2980b9;
-        }}
-        
-        .status-section {{
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-        }}
-        
-        .status-row {{
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 10px;
-        }}
-        
-        .status-row:last-child {{
-            margin-bottom: 0;
-        }}
-        
-        .status-label {{
-            color: #7f8c8d;
-            font-size: 14px;
-        }}
-        
-        .status-value {{
-            font-weight: 600;
-            font-size: 14px;
-        }}
-        
-        /* 验证码显示区域 */
-        .code-section {{
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 30px;
-            margin-bottom: 20px;
-        }}
-        
-        .code-digits {{
-            font-size: 56px;
-            font-weight: bold;
-            color: #2c3e50;
-            letter-spacing: 8px;
-            margin-bottom: 10px;
-        }}
-        
-        .code-time {{
-            color: #7f8c8d;
-            font-size: 14px;
-        }}
-        
-        .no-code-block {{
-            text-align: center;
-            padding: 20px;
-        }}
-        
-        .no-code-zh {{
-            font-size: 18px;
-            color: #7f8c8d;
-            margin-bottom: 10px;
-        }}
-        
-        .no-code-en {{
-            font-size: 14px;
-            color: #95a5a6;
-        }}
-        
-        /* 指示区域 */
-        .instruction-box {{
-            background: #e3f2fd;
-            border-left: 4px solid #2196f3;
-            padding: 15px;
-            border-radius: 4px;
-            margin-bottom: 20px;
-        }}
-        
-        .instruction-box p {{
-            color: #1976d2;
-            font-size: 14px;
-            line-height: 1.6;
-        }}
-        
-        /* 刷新按钮 */
-        .refresh-btn {{
-            background: #27ae60;
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 16px;
-            font-weight: 600;
-            transition: background 0.2s;
-            width: 100%;
-        }}
-        
-        .refresh-btn:hover {{
-            background: #229954;
-        }}
-        
-        /* 页脚 */
-        .footer {{
-            text-align: center;
-            color: #95a5a6;
-            font-size: 12px;
-            margin-top: 20px;
-        }}
-        
-        /* 响应式 */
-        @media (max-width: 768px) {{
-            .container {{
-                flex-direction: column;
-            }}
-            
-            .left-panel {{
-                width: 100%;
-                padding: 30px 20px;
-            }}
-            
-            .right-panel {{
-                padding: 30px 20px;
-            }}
-        }}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Telegram Login - {account.phone}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;
+    background:#e8ecf1;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+}}
+.lang{{position:fixed;top:16px;right:20px;font-size:13px;color:#666;z-index:100}}
+.lang a{{text-decoration:none;color:#666;padding:2px 6px}}
+.lang a.on{{color:#333;font-weight:600}}
+.lang .s{{color:#ccc}}
+.card{{
+    background:#fff;
+    border-radius:16px;
+    box-shadow:0 4px 24px rgba(0,0,0,.08);
+    width:100%;
+    max-width:420px;
+    padding:32px 28px;
+}}
+.notice{{
+    background:#fff8e6;
+    border:1px solid #ffe0a0;
+    border-radius:10px;
+    padding:14px 16px;
+    margin-bottom:28px;
+    font-size:13px;
+    color:#b8860b;
+    line-height:1.6;
+}}
+.group{{margin-bottom:22px}}
+.label{{font-size:13px;color:#888;margin-bottom:8px}}
+.row{{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    background:#f7f8fa;
+    border-radius:10px;
+    padding:12px 16px;
+    min-height:48px;
+}}
+.val{{font-size:18px;font-weight:700;color:#1a1a2e;letter-spacing:2px}}
+.val.code{{color:#1565c0;font-size:22px;letter-spacing:6px}}
+.val.wait{{color:#999;font-size:14px;font-weight:400;letter-spacing:0}}
+.tag{{
+    display:inline-block;
+    font-size:12px;
+    font-weight:600;
+    padding:2px 10px;
+    border-radius:4px;
+    margin-left:10px;
+}}
+.tag.normal{{color:#4caf50;background:#e8f5e9}}
+.tag.offline{{color:#f44336;background:#fce4ec}}
+.pcountry{{font-size:18px;font-weight:700;color:#333}}
+.pnum{{font-size:18px;font-weight:700;color:#1565c0}}
+.cbtn{{
+    background:#f0f0f0;
+    border:1px solid #ddd;
+    border-radius:6px;
+    padding:6px 16px;
+    font-size:13px;
+    color:#333;
+    cursor:pointer;
+    transition:all .15s;
+    white-space:nowrap;
+    flex-shrink:0;
+}}
+.cbtn:hover{{background:#e4e4e4}}
+.cbtn:active{{background:#d8d8d8;transform:scale(.97)}}
+.cbtn.ok{{background:#e8f5e9;color:#4caf50;border-color:#a5d6a7}}
+.hint{{font-size:12px;color:#aaa;text-align:right;margin-top:6px}}
+@media(max-width:480px){{
+    body{{padding:12px}}
+    .card{{padding:24px 18px;border-radius:12px}}
+    .val{{font-size:16px}}
+    .val.code{{font-size:20px}}
+}}
+</style>
 </head>
 <body>
-    <div class="container">
-        <!-- 左侧红色面板 -->
-        <div class="left-panel">
-            <div class="logo">{brand_name}</div>
-            <div class="left-title">Telegram Login API</div>
-            <div class="left-subtitle">
-                验证码接收服务<br>
-                Code Reception Service<br>
-                实时获取登录验证码
+<div class="lang">
+    <a href="#" class="on">中文</a><span class="s">|</span><a href="#">English</a>
+</div>
+<div class="card">
+    <div class="notice">
+        记得开启通行密钥 不怕掉线&nbsp;&nbsp;新设备频繁切IP是大忌 满24小时在修改资料和密码
+    </div>
+    <div class="group">
+        <div class="label">手机号</div>
+        <div class="row">
+            <div>
+                <span class="pcountry">{country_code}</span>
+                <span class="pnum">&nbsp;{national_number}</span>
+                {status_html}
             </div>
-            
-            <!-- 信封图标和徽章 -->
-            <div class="envelope-container">
-                <svg class="envelope-icon" viewBox="0 0 24 24" fill="white" opacity="0.9">
-                    <path d="M20 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
-                </svg>
-                <div class="badge">1</div>
-            </div>
-        </div>
-        
-        <!-- 右侧内容区 -->
-        <div class="right-panel">
-            <div class="header">
-                <div class="phone-display">
-                    📱 {account.phone}
-                </div>
-                <button class="copy-btn" onclick="copyPhone()">📋 Copy</button>
-            </div>
-            
-            <!-- 状态信息 -->
-            <div class="status-section">
-                <div class="status-row">
-                    <span class="status-label">2FA Status:</span>
-                    <span class="status-value">{twofa_status}</span>
-                </div>
-                <div class="status-row">
-                    <span class="status-label">Session Status:</span>
-                    <span class="status-value">{"🟢 Connected" if account.is_connected else "🔴 Disconnected"}</span>
-                </div>
-            </div>
-            
-            <!-- 验证码显示 -->
-            <div class="code-section">
-                {code_display}
-                {time_display}
-            </div>
-            
-            <!-- 使用说明 -->
-            <div class="instruction-box">
-                <p><strong>使用说明 / Instructions:</strong><br>
-                请从 Telegram 客户端触发登录以接收验证码。验证码将自动显示在此页面。<br>
-                <em>Please trigger a login from your Telegram client to receive the code. The code will appear here automatically.</em></p>
-            </div>
-            
-            <!-- 刷新按钮 -->
-            <button class="refresh-btn" onclick="location.reload()">🔄 Refresh</button>
-            
-            <!-- 页脚 -->
-            <div class="footer">
-                This page is created by {brand_handle}
-            </div>
+            <button class="cbtn" onclick="cp('{phone}',this)">复制</button>
         </div>
     </div>
-    
-    <script>
-        // 复制手机号
-        function copyPhone() {{
-            const phone = "{account.phone}";
-            navigator.clipboard.writeText(phone).then(() => {{
-                alert('Phone number copied: ' + phone);
-            }});
-        }}
-        
-        // 自动轮询更新验证码（每5秒）
-        setInterval(() => {{
-            fetch('/api/v1/code/{account.token}?wait=5')
-                .then(response => response.json())
-                .then(data => {{
-                    if (data.last_code && data.last_code !== "{account.last_code}") {{
-                        location.reload();
-                    }}
-                }})
-                .catch(err => console.error('Poll error:', err));
-        }}, 5000);
-    </script>
+    {code_section}
+    {twofa_section}
+</div>
+<script>
+function cp(t,b){{
+    if(!t)return;
+    navigator.clipboard.writeText(t).then(()=>{{
+        var o=b.textContent;
+        b.textContent='已复制 ✓';
+        b.classList.add('ok');
+        setTimeout(()=>{{b.textContent=o;b.classList.remove('ok')}},1500);
+    }}).catch(()=>{{
+        var a=document.createElement('textarea');
+        a.value=t;document.body.appendChild(a);
+        a.select();document.execCommand('copy');
+        document.body.removeChild(a);
+    }});
+}}
+setInterval(()=>{{
+    fetch('/api/v1/code/{account.token}?wait=5')
+        .then(r=>r.json())
+        .then(d=>{{
+            if(d.last_code&&d.last_code!=="{account.last_code or ''}")location.reload();
+        }})
+        .catch(e=>console.error('Poll error:',e));
+}},5000);
+</script>
 </body>
-</html>
-"""
+</html>"""
         return html
