@@ -7724,7 +7724,7 @@ class APIFormatConverter:
         conn = sqlite3.connect(self.db.db_name)
         c = conn.cursor()
         c.execute("""
-            SELECT phone, api_key, verification_url, two_fa_password, session_data, tdata_path
+            SELECT phone, api_key, verification_url, two_fa_password, session_data, tdata_path, status
             FROM api_accounts WHERE api_key=?
         """, (api_key,))
         row = c.fetchone()
@@ -7737,13 +7737,25 @@ class APIFormatConverter:
             "verification_url": row[2],
             "two_fa_password": row[3] or "",
             "session_data": row[4] or "",
-            "tdata_path": row[5] or ""
+            "tdata_path": row[5] or "",
+            "status": row[6] or "active"
         }
 
     def save_verification_code(self, phone: str, code: str, code_type: str):
         import sqlite3
         conn = sqlite3.connect(self.db.db_name)
         c = conn.cursor()
+        # 去重：5分钟内同手机号同code不重复插入
+        cutoff = (datetime.now(BEIJING_TZ) - timedelta(minutes=5)).isoformat()
+        c.execute("""
+            SELECT id FROM verification_codes
+            WHERE phone=? AND code=? AND received_at > ?
+            LIMIT 1
+        """, (phone, code, cutoff))
+        if c.fetchone():
+            conn.close()
+            print("📱 验证码已存在(跳过): %s - %s" % (phone, code))
+            return
         expires_at = (datetime.now(BEIJING_TZ) + timedelta(minutes=10)).isoformat()
         c.execute("""
             INSERT INTO verification_codes (phone, code, code_type, received_at, expires_at)
@@ -7757,6 +7769,7 @@ class APIFormatConverter:
         import sqlite3
         conn = sqlite3.connect(self.db.db_name)
         c = conn.cursor()
+        # 优先返回未用且未过期的最新验证码
         c.execute("""
             SELECT code, code_type, received_at
             FROM verification_codes
@@ -7765,10 +7778,22 @@ class APIFormatConverter:
             LIMIT 1
         """, (phone, datetime.now(BEIJING_TZ).isoformat()))
         row = c.fetchone()
+        if row:
+            conn.close()
+            return {"code": row[0], "code_type": row[1], "received_at": row[2]}
+        # 没有未用的，返回最近一条（不管used状态）
+        c.execute("""
+            SELECT code, code_type, received_at
+            FROM verification_codes
+            WHERE phone=?
+            ORDER BY received_at DESC
+            LIMIT 1
+        """, (phone,))
+        row = c.fetchone()
         conn.close()
-        if not row:
-            return None
-        return {"code": row[0], "code_type": row[1], "received_at": row[2]}
+        if row:
+            return {"code": row[0], "code_type": row[1], "received_at": row[2]}
+        return None
 
     # ---------- 账号信息提取 ----------
     async def extract_account_info_from_session(self, session_file: str) -> dict:
@@ -7939,7 +7964,7 @@ class APIFormatConverter:
         return [out_txt]
 
     # ---------- 自动监听 777000 ----------
-    def start_code_watch(self, api_key: str, timeout: int = 300, fresh: bool = False, history_window_sec: int = 0):
+    def start_code_watch(self, api_key: str, timeout: int = 1800, fresh: bool = False, history_window_sec: int = 0):
         try:
             acc = self.get_account_by_api_key(api_key)
             if not acc:
@@ -7969,7 +7994,7 @@ class APIFormatConverter:
         except Exception as e:
             return False, "启动失败: %s" % e
 
-    async def _watch_code_async(self, acc: Dict[str, Any], timeout: int = 300, api_key: str = ""):
+    async def _watch_code_async(self, acc: Dict[str, Any], timeout: int = 1800, api_key: str = ""):
         if not TELETHON_AVAILABLE:
             print("❌ Telethon 未安装，自动监听不可用")
             return
@@ -8029,25 +8054,33 @@ class APIFormatConverter:
                 entity = await client.get_entity(777000)
                 if is_fresh and window_sec > 0:
                     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_sec)
-                    async for msg in client.iter_messages(entity, limit=10):
+                    found_codes = []
+                    async for msg in client.iter_messages(entity, limit=20):
                         msg_dt = msg.date
                         if msg_dt.tzinfo is None:
                             msg_dt = msg_dt.replace(tzinfo=timezone.utc)
                         if msg_dt >= cutoff:
                             code = extract_code(getattr(msg, "raw_text", "") or getattr(msg, "message", ""))
-                            if code:
+                            if code and code not in found_codes:
+                                found_codes.append(code)
                                 self.save_verification_code(phone, code, "app")
-                                return
+                                print("[WATCH] 历史回扫发现验证码: %s (时间: %s)" % (code, msg_dt))
+                    if found_codes:
+                        print("[WATCH] 历史回扫共找到 %d 个验证码，继续实时监听" % len(found_codes))
                 elif not is_fresh:
-                    async for msg in client.iter_messages(entity, limit=5):
+                    found_codes = []
+                    async for msg in client.iter_messages(entity, limit=10):
                         msg_dt = msg.date
                         if msg_dt.tzinfo is None:
                             msg_dt = msg_dt.replace(tzinfo=timezone.utc)
                         if datetime.now(timezone.utc) - msg_dt <= timedelta(minutes=10):
                             code = extract_code(getattr(msg, "raw_text", "") or getattr(msg, "message", ""))
-                            if code:
+                            if code and code not in found_codes:
+                                found_codes.append(code)
                                 self.save_verification_code(phone, code, "app")
-                                return
+                                print("[WATCH] 历史回扫发现验证码: %s (时间: %s)" % (code, msg_dt))
+                    if found_codes:
+                        print("[WATCH] 历史回扫共找到 %d 个验证码，继续实时监听" % len(found_codes))
             except Exception as e:
                 print("⚠️ 历史读取失败: %s" % e)
 
@@ -8194,7 +8227,7 @@ tick(); setInterval(tick,3000);
             except Exception:
                 return int(default)
 
-        timeout = _safe_int(q.get('timeout', None), 300)
+        timeout = _safe_int(q.get('timeout', None), 1800)
         window_sec = _safe_int(q.get('window_sec', None), 0)
         ok, msg = self.start_code_watch(api_key, timeout=timeout, fresh=fresh, history_window_sec=window_sec)
         return jsonify({"ok": ok, "message": msg, "timeout": timeout, "window_sec": window_sec})
@@ -8262,370 +8295,341 @@ def _afc_env(self, key: str, default: str = "") -> str:
     return str(val).strip().strip('"').strip("'")
 
 # 渲染模板：深色主题、内容居中放大、2FA/验证码/手机号复制（HTTPS+回退）、支持 .env 文案、标题模板
-def _afc_render_verification_template(self, phone: str, api_key: str, two_fa_password: str = "") -> str:
+def _afc_render_verification_template(self, phone: str, api_key: str, two_fa_password: str = "", status: str = "active") -> str:
     from flask import render_template_string
+    import json
 
-    # 文案/标题
-    brand = _afc_env(self, "VERIFY_BRAND", "Top9")
-    badge = _afc_env(self, "VERIFY_BADGE", brand)
-    page_heading = _afc_env(self, "VERIFY_PAGE_HEADING", "验证码接收")
-    page_title_tpl = _afc_env(self, "VERIFY_PAGE_TITLE", "{brand} · {heading} · {phone}")
-    page_title = page_title_tpl.format(brand=(badge or brand), heading=page_heading, phone=phone)
+    # 解析手机号
+    country_code = ""
+    national_number = phone or ""
+    try:
+        import phonenumbers
+        p = phone if phone.startswith('+') else '+' + phone
+        parsed = phonenumbers.parse(p, None)
+        country_code = "+%d" % parsed.country_code
+        national_number = str(parsed.national_number)
+    except Exception:
+        if phone and phone.startswith('+'):
+            for i in [3, 2, 1]:
+                if len(phone) > i + 4:
+                    country_code = phone[:i+1]
+                    national_number = phone[i+1:]
+                    break
 
-    ad_html_default = _afc_env(
-        self, "VERIFY_FOOTER_HTML",
-        _afc_env(self, "VERIFY_AD_HTML", "Top9 · 安全、极速 · 联系我们：<a href='https://example.com' target='_blank' rel='noopener'>example.com</a>")
-    )
-
-    txt = {
-        "brand_badge": badge,
-        "left_title": _afc_env(self, "VERIFY_LEFT_TITLE", "Telegram Login API"),
-        "left_cn": _afc_env(self, "VERIFY_LEFT_CN", "安全、快速的 Telegram 登录验证服务"),
-        "left_en": _afc_env(self, "VERIFY_LEFT_EN", "Secure and Fast Telegram Authentication Service"),
-        "hero_title": _afc_env(self, "VERIFY_HERO_TITLE", brand),
-        "hero_subtitle": _afc_env(self, "VERIFY_HERO_SUBTITLE", "BRANDED AUTH PORTAL"),
-
-        "page_heading": page_heading,
-        "page_subtext": _afc_env(self, "VERIFY_PAGE_SUBTEXT", "打开此页已自动开始监听 App 内验证码（777000）。"),
-        "phone_label": _afc_env(self, "VERIFY_PHONE_LABEL", "PHONE"),
-        "copy_btn": _afc_env(self, "VERIFY_COPY_BTN", "复制"),
-        "refresh_btn": _afc_env(self, "VERIFY_REFRESH_BTN", "刷新"),
-        "twofa_label": _afc_env(self, "VERIFY_2FA_LABEL", "2FA"),
-        "copy_2fa_btn": _afc_env(self, "VERIFY_COPY_2FA_BTN", "复制2FA"),
-
-        "status_wait": _afc_env(self, "VERIFY_STATUS_WAIT", "读取验证码中 · READING THE VERIFICATION CODE."),
-        "status_ok": _afc_env(self, "VERIFY_STATUS_OK", "验证码已接收 · VERIFICATION CODE RECEIVED."),
-
-        "footer_html": ad_html_default,
-
-        "toast_copied_phone": _afc_env(self, "VERIFY_TOAST_COPIED_PHONE", "已复制手机号"),
-        "toast_copied_code": _afc_env(self, "VERIFY_TOAST_COPIED_CODE", "已复制验证码"),
-        "toast_copied_2fa": _afc_env(self, "VERIFY_TOAST_COPIED_2FA", "已复制 2FA"),
-        "toast_refresh_ok": _afc_env(self, "VERIFY_TOAST_REFRESH_OK", "已刷新，将只获取2分钟内的验证码"),
-        "toast_refresh_fail": _afc_env(self, "VERIFY_TOAST_REFRESH_FAIL", "刷新失败"),
-        "toast_no_code": _afc_env(self, "VERIFY_TOAST_NO_CODE", "暂无验证码可复制"),
-    }
-    txt_json = json.dumps(txt, ensure_ascii=False)
-
-    template = r'''<!DOCTYPE html>
-<html lang="zh-CN">
+    template = r"""<!DOCTYPE html>
+<html lang="zh">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ page_title }}</title>
-  <style>
-    :root{
-      --bg:#0b0f14; --bg2:#0f1621;
-      --panel:#111827; --panel2:#0f172a;
-      --text:#e5e7eb; --muted:#9ca3af; --border:#243244;
-      --brand1:#06b6d4; --brand2:#3b82f6; --ok:#34d399; --warn:#fbbf24;
-      --accent:#7dd3fc;
-    }
-    *{box-sizing:border-box}
-    html,body{height:100%}
-    body{
-      margin:0; padding:20px; min-height:100%;
-      font-family:Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
-      color:var(--text);
-      background:
-        radial-gradient(1200px 600px at -10% -10%, rgba(6,182,212,.10), transparent),
-        radial-gradient(900px 500px at 110% 110%, rgba(59,130,246,.10), transparent),
-        linear-gradient(180deg, var(--bg), var(--bg2));
-      display:flex; align-items:center; justify-content:center;
-    }
-    .wrap{ width:100%; max-width:1200px; display:grid; grid-template-columns: 380px 1fr; gap:22px; }
-    @media(max-width:1100px){ .wrap{ grid-template-columns:1fr; } }
-
-    .brand{
-      background:linear-gradient(180deg,#0f172a,#0b1220);
-      border:1px solid var(--border); border-radius:18px; padding:26px; position:relative;
-      box-shadow:0 18px 60px rgba(0,0,0,.45); overflow:hidden;
-    }
-    .badge{ display:inline-block; padding:8px 14px; border-radius:999px; border:1px solid rgba(6,182,212,.4);
-            color:#7dd3fc; background:rgba(6,182,212,.12); font-weight:800; letter-spacing:.5px; }
-    .brand h2{ margin:16px 0 10px; font-size:28px; }
-    .brand p{ margin:0; color:var(--muted); line-height:1.6; }
-    .hero{ margin-top:26px; text-align:center; border:1px dashed var(--border); border-radius:14px; padding:16px; background:rgba(2,6,23,.45); }
-    .hero .big{ font-size:46px; font-weight:900; letter-spacing:2px; color:#93c5fd; }
-
-    .panel{ background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:22px; box-shadow:0 18px 60px rgba(0,0,0,.45); }
-    .inner{ max-width:820px; margin:0 auto; } /* 右侧内容更居中 */
-    .head{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
-    .title{ font-size:24px; font-weight:900; letter-spacing:.3px; }
-    .muted{ color:var(--muted); font-size:14px; }
-
-    .row{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
-    .row.center{ justify-content:center; }
-    .pill{ background:rgba(148,163,184,.12); color:#cbd5e1; padding:8px 12px; border-radius:999px; font-size:13px; border:1px solid var(--border); }
-    .btn{ border:none; background:linear-gradient(135deg,var(--brand1),var(--brand2)); color:#fff; padding:10px 16px; border-radius:12px; cursor:pointer; font-weight:800; box-shadow:0 12px 24px rgba(59,130,246,.25); }
-
-    .phone{
-      margin-top:16px; background:var(--panel2); border:1px solid var(--border); border-radius:14px; padding:14px 16px;
-      display:flex; align-items:center; justify-content:center; gap:14px; flex-wrap:wrap;
-    }
-    .phone .number{ font-size:24px; font-weight:900; letter-spacing:1px; color:#e6f0ff; }
-    .btn.secondary{ background:#0b1220; border:1px solid var(--border); color:#9ac5ff; box-shadow:none; }
-
-    .twofa{ margin-top:10px; display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; }
-    .twofa code{ background:#0b1220; border:1px solid var(--border); padding:16px 20px; border-radius:14px; font-size:24px; font-weight:700; letter-spacing:2px; min-width:120px; text-align:center; }
-
-    .status{ margin:18px auto 0; padding:14px 16px; border-radius:14px; text-align:center; font-weight:900; border:1px solid var(--border); max-width:820px; }
-    .status.wait{ background:rgba(245,158,11,.12); color:#fbbf24; }
-    .status.ok{ background:rgba(34,197,94,.12); color:var(--ok); }
-
-    .code-wrap{ margin:18px auto 0; padding:20px; border-radius:18px; background:#0b1220; border:2px solid #1e2a3a; display:flex; align-items:center; justify-content:space-between; gap:16px; max-width:820px; }
-    .code{ flex:1; display:flex; justify-content:center; gap:14px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace; }
-    .digit{ width:86px; height:94px; border-radius:14px; background:#0c1422; border:2px solid #233247; color:#7dd3fc; font-size:52px; font-weight:900; display:flex; align-items:center; justify-content:center; box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 6px 18px rgba(2,6,23,.45); }
-
-    .meta{ margin-top:10px; text-align:center; color:#9ca3af; font-size:13px; }
-
-    .footer{ margin-top:20px; border-top:1px solid var(--border); padding-top:12px; text-align:center; color:#9ca3af; font-size:12px; }
-    .ad{ margin-top:10px; color:#cbd5e1; }
-
-    .toast{
-      position:fixed; left:50%; bottom:26px;
-      transform:translateX(-50%) translateY(20px);
-      background:rgba(15,23,42,.95); color:#e5e7eb;
-      border:1px solid var(--border); padding:10px 14px;
-      border-radius:10px; font-weight:800; font-size:14px;
-      box-shadow:0 12px 30px rgba(0,0,0,.45);
-      opacity:0; pointer-events:none; z-index:9999;
-      transition:opacity .18s ease, transform .18s ease;
-    }
-    .toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Telegram Login · {{ phone }}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+  background:#e8ecf1;
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:16px;
+}
+.card{
+  background:#fff;
+  border-radius:16px;
+  box-shadow:0 4px 24px rgba(0,0,0,.08);
+  width:100%;
+  max-width:420px;
+  padding:28px 24px;
+}
+.notice{
+  background:#fff8e6;
+  border:1px solid #ffe0a0;
+  border-radius:10px;
+  padding:14px 16px;
+  margin-bottom:24px;
+  font-size:13px;
+  color:#b8860b;
+  line-height:1.7;
+  font-weight:600;
+}
+.group{margin-bottom:20px}
+.label{font-size:13px;color:#888;margin-bottom:8px;font-weight:700}
+.row{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  background:#f7f8fa;
+  border-radius:10px;
+  padding:14px 16px;
+  min-height:52px;
+  gap:10px;
+}
+.phone-info{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:1;min-width:0}
+.pcountry{font-size:18px;font-weight:700;color:#333}
+.pnum{font-size:18px;font-weight:700;color:#1565c0}
+.tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:4px;margin-left:4px;white-space:nowrap}
+.tag.ok{color:#4caf50;background:#e8f5e9}
+.tag.checking{color:#fff;background:#90a4ae;font-size:11px}
+.tag.banned{color:#fff;background:#f44336;font-size:11px}
+.tag.unauth{color:#fff;background:#ff9800;font-size:10px}
+.tag.off{color:#f44336;background:#fce4ec}
+.val{font-size:20px;font-weight:700;color:#1565c0;letter-spacing:4px;flex:1}
+.val.wait{color:#999;font-size:14px;font-weight:400;letter-spacing:0}
+.cbtn{
+  background:#f0f0f0;
+  border:1px solid #ddd;
+  border-radius:6px;
+  padding:8px 16px;
+  font-size:13px;
+  color:#333;
+  cursor:pointer;
+  white-space:nowrap;
+  flex-shrink:0;
+  -webkit-tap-highlight-color:transparent;
+  transition:background .15s;
+}
+.cbtn:active{background:#d8d8d8}
+.cbtn.ok{background:#e8f5e9;color:#4caf50;border-color:#a5d6a7}
+.hint{font-size:12px;color:#f57c00;text-align:right;margin-top:6px}
+.status{
+  text-align:center;
+  padding:14px;
+  border-radius:10px;
+  font-size:14px;
+  font-weight:600;
+  margin-bottom:20px;
+}
+.status.waiting{background:#fff8e6;color:#f5a623}
+.status.done{background:#e8f5e9;color:#4caf50}
+.refresh-row{display:flex;justify-content:center;margin-top:16px}
+.refresh-btn{
+  background:linear-gradient(135deg,#06b6d4,#3b82f6);
+  color:#fff;
+  border:none;
+  border-radius:8px;
+  padding:10px 28px;
+  font-size:14px;
+  font-weight:600;
+  cursor:pointer;
+  -webkit-tap-highlight-color:transparent;
+}
+.refresh-btn:active{opacity:.8}
+.toast{
+  position:fixed;left:50%;bottom:24px;
+  transform:translateX(-50%) translateY(20px);
+  background:rgba(0,0,0,.78);color:#fff;
+  padding:10px 20px;border-radius:8px;
+  font-size:13px;font-weight:600;
+  opacity:0;pointer-events:none;z-index:9999;
+  transition:opacity .2s,transform .2s;
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media(max-width:480px){
+  body{padding:10px}
+  .card{padding:22px 16px;border-radius:12px}
+  .pcountry,.pnum{font-size:16px}
+  .val{font-size:18px}
+  .cbtn{padding:8px 12px;font-size:12px}
+}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <section class="brand">
-      <div class="badge">{{ txt.brand_badge }}</div>
-      <h2>{{ txt.left_title }}</h2>
-      <p>{{ txt.left_cn }}<br>{{ txt.left_en }}</p>
-      <div class="hero">
-        <div class="big">{{ txt.hero_title }}</div>
-        <div class="muted">{{ txt.hero_subtitle }}</div>
-      </div>
-    </section>
-
-    <section class="panel">
-      <div class="inner">
-        <div class="head">
-          <div>
-            <div class="title">{{ txt.page_heading }}</div>
-            <div class="muted">{{ txt.page_subtext }}</div>
-          </div>
-          <button class="btn" id="refresh-btn">{{ txt.refresh_btn }}</button>
-        </div>
-
-        <div class="phone">
-          <span class="pill">{{ txt.phone_label }}</span>
-          <strong class="number">{{ phone }}</strong>
-          <button class="btn secondary" id="copy-phone">{{ txt.copy_btn }}</button>
-          {% if two_fa_password %}
-          <span class="pill">{{ txt.twofa_label }}</span>
-          <code id="twofa-text">{{ two_fa_password }}</code>
-          <button class="btn secondary" id="copy-2fa">{{ txt.copy_2fa_btn }}</button>
-          {% endif %}
-        </div>
-
-        <div id="status" class="status wait">{{ txt.status_wait }}</div>
-
-        <div class="code-wrap" id="code-wrap" style="display:none;">
-          <div class="code" id="code-boxes"></div>
-          <button class="btn" id="copy-code">{{ txt.copy_btn }}</button>
-        </div>
-
-        <div class="meta" id="meta" style="display:none;"></div>
-
-        <div class="footer">
-          <div class="ad">{{ txt.footer_html | safe }}</div>
-        </div>
-      </div>
-    </section>
+<div class="card">
+  <div class="notice">
+    记得开启通行密钥 不怕掉线&nbsp;&nbsp;新设备频繁切IP是大忌&nbsp;&nbsp;满24小时在修改资料和密码
   </div>
 
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div class="group">
+    <div class="label">手机号</div>
+    <div class="row">
+      <div class="phone-info">
+        <span class="pcountry">{{ country_code }}</span>
+        <span class="pnum">{{ national_number }}</span>
+<span class="tag checking" id="status-tag">检测中...</span>
+      </div>
+      <button class="cbtn" onclick="cp('{{ phone }}',this)">复制</button>
+    </div>
+  </div>
 
-  <script>
-    const TXT = {{ txt_json | safe }};
+  <div class="group">
+    <div class="label">登录验证码</div>
+    <div id="code-row" class="row">
+      <span id="code-val" class="val wait">等待验证码...</span>
+      <button class="cbtn" id="copy-code" style="display:none" onclick="cpCode(this)">复制</button>
+    </div>
+    <div id="code-hint" class="hint" style="display:none"></div>
+  </div>
 
-    fetch('/api/start_watch/{{ api_key }}', { method: 'POST' }).catch(()=>{});
+  {% if two_fa_password %}
+  <div class="group">
+    <div class="label">两步验证 (2FA) 密码</div>
+    <div class="row">
+      <span class="val">{{ two_fa_password }}</span>
+      <button class="cbtn" onclick="cp('{{ two_fa_password }}',this)">复制</button>
+    </div>
+  </div>
+  {% endif %}
 
-    let codeValue = '';
-    let pollingTimer = null;
-    let stopTimer = null;
-    let toastTimer = null;
+  <div id="status" class="status waiting">读取验证码中...</div>
 
-    function showToast(text, duration){
-      try{
-        const t = document.getElementById('toast');
-        if (!t) return;
-        t.textContent = text || '';
-        t.classList.add('show');
-        if (toastTimer) clearTimeout(toastTimer);
-        toastTimer = setTimeout(()=>{ t.classList.remove('show'); }, duration || 1500);
-      }catch(e){}
+  <div class="refresh-row">
+    <button class="refresh-btn" id="refresh-btn">刷新</button>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+var apiKey='{{ api_key }}';
+var PREFIX=window.location.pathname.split('/verify/')[0]||'';
+var codeValue='';
+var polling=null, toastT=null;
+var watchStarted=false;
+
+// 打开页面=启动监听（带历史回扫120秒）
+function startWatch(){
+  if(watchStarted)return;
+  watchStarted=true;
+  fetch(PREFIX+'/api/start_watch/'+apiKey+'?fresh=0&window_sec=120',{method:'POST'})
+    .then(function(){console.log('监听已启动')})
+    .catch(function(){console.log('监听启动失败')});
+}
+
+// 关闭/离开页面=停止监听
+function stopWatch(){
+  if(polling)clearInterval(polling);
+  polling=null;
+  watchStarted=false;
+  // 通知后端停止（用 sendBeacon 确保关闭页面时也能发出）
+  try{
+    navigator.sendBeacon(PREFIX+'/api/stop_watch/'+apiKey);
+  }catch(e){}
+}
+
+function toast(m,d){
+  var t=document.getElementById('toast');
+  if(!t)return;
+  t.textContent=m||'';
+  t.classList.add('show');
+  if(toastT)clearTimeout(toastT);
+  toastT=setTimeout(function(){t.classList.remove('show')},d||1500);
+}
+
+function cp(t,b){
+  if(!t)return;
+  try{
+    if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(t).then(function(){done(b)}).catch(function(){fb(t,b)});
+      return;
     }
+    fb(t,b);
+  }catch(e){fb(t,b)}
+}
+function fb(t,b){
+  var a=document.createElement('textarea');
+  a.value=t;a.style.position='fixed';a.style.opacity='0';
+  document.body.appendChild(a);a.select();
+  try{document.execCommand('copy');done(b)}catch(e){toast('复制失败')}
+  document.body.removeChild(a);
+}
+function done(b){
+  if(!b)return;
+  var o=b.textContent;
+  b.textContent='已复制 ✓';b.classList.add('ok');
+  setTimeout(function(){b.textContent=o;b.classList.remove('ok')},1500);
+  toast('已复制');
+}
+function cpCode(b){
+  if(codeValue){cp(codeValue,b)}else{toast('暂无验证码')}
+}
 
-    function notify(msg){
-      try{ if(typeof showToast==='function'){ showToast(msg); } else { alert(msg); } }
-      catch(e){ alert(msg); }
-    }
-    async function copyTextUniversal(text){
-      try{
-        if(!text){ notify('内容为空'); return false; }
-        text = String(text);
-        if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(text);
-          notify('已复制');
-          return true;
+function checkCode(){
+  fetch(PREFIX+'/api/get_code/'+apiKey)
+    .then(function(r){return r.json()})
+    .then(function(d){
+      if(d.success&&d.code){
+        var el=document.getElementById('code-val');
+        var hint=document.getElementById('code-hint');
+        var st=document.getElementById('status');
+        // 有新验证码就更新显示
+        if(d.code!==codeValue){
+          codeValue=d.code;
+          el.textContent=d.code;
+          el.className='val';
+          document.getElementById('copy-code').style.display='';
+          hint.style.display='block';
+          hint.textContent='收到于: '+new Date(d.received_at).toLocaleString();
+          st.className='status done';
+          st.textContent='验证码已接收 ✓';
         }
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.setAttribute('readonly','');
-        ta.style.position = 'fixed';
-        ta.style.top = '-9999px';
-        ta.style.left = '-9999px';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        const ua = navigator.userAgent.toLowerCase();
-        if (/ipad|iphone|ipod/.test(ua)) {
-          const range = document.createRange();
-          range.selectNodeContents(ta);
-          const sel = window.getSelection();
-          sel.removeAllRanges(); sel.addRange(range);
-          ta.setSelectionRange(0, 999999);
-        } else {
-          ta.select();
-        }
-        const ok = document.execCommand('copy');
-        document.body.removeChild(ta);
-        if (ok) { notify('已复制'); return true; }
-        throw new Error('execCommand copy failed');
-      } catch (e) {
-        console.warn('Copy failed:', e);
-        notify('复制失败，请手动选择并复制');
-        return false;
       }
+    }).catch(function(){});
+}
+
+// 页面打开：启动监听 + 轮询
+startWatch();
+checkCode();
+polling=setInterval(checkCode,2000);
+
+// 刷新按钮：重新启动监听
+document.getElementById('refresh-btn').addEventListener('click',function(){
+  codeValue='';
+  document.getElementById('code-val').textContent='等待验证码...';
+  document.getElementById('code-val').className='val wait';
+  document.getElementById('copy-code').style.display='none';
+  document.getElementById('code-hint').style.display='none';
+  document.getElementById('status').className='status waiting';
+  document.getElementById('status').textContent='读取验证码中...';
+  watchStarted=false;
+  fetch(PREFIX+'/api/start_watch/'+apiKey+'?fresh=1&window_sec=120',{method:'POST'})
+    .then(function(){watchStarted=true;toast('已刷新');setTimeout(checkCode,500)})
+    .catch(function(){toast('刷新失败')});
+});
+
+// 页面关闭/隐藏=停止监听
+window.addEventListener('beforeunload',stopWatch);
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden){
+    stopWatch();
+  }else{
+    // 重新打开页面=重新监听
+    startWatch();
+    if(!polling)polling=setInterval(checkCode,2000);
+    checkCode();
+  }
+});
+
+// 实时检测账号状态
+fetch(PREFIX+'/api/account_status/'+apiKey)
+  .then(function(r){return r.json()})
+  .then(function(d){
+    var tag=document.getElementById('status-tag');
+    if(!tag)return;
+    if(d.status==='banned'){
+      tag.textContent='账号已封禁';
+      tag.className='tag banned';
+    }else if(d.status==='unauthorized'){
+      tag.textContent='掉授权 联系客服';
+      tag.className='tag unauth';
+    }else{
+      tag.textContent='正常';
+      tag.className='tag ok';
     }
-
-    function renderDigits(code){
-      const box = document.getElementById('code-boxes');
-      box.innerHTML = '';
-      const s = (code || '').trim();
-      
-      // 直接设置到按钮的 data 属性
-      const copyBtn = document.getElementById('copy-code');
-      if (copyBtn) {
-        copyBtn.setAttribute('data-code', s);
-      }
-      
-      for(const ch of s){
-        const d = document.createElement('div');
-        d.className = 'digit';
-        d.textContent = ch;
-        box.appendChild(d);
-      }
-    }
-
-    function setStatus(ok, text){
-      const s = document.getElementById('status');
-      s.className = 'status ' + (ok ? 'ok' : 'wait');
-      s.textContent = text || (ok ? TXT.status_ok : TXT.status_wait);
-    }
-
-    function checkCode(){
-      fetch('/api/get_code/{{ api_key }}')
-        .then(r => r.json())
-        .then(d => {
-          if(d.success){
-            if(d.code && d.code !== codeValue){
-              codeValue = d.code;
-              renderDigits(codeValue);
-              document.getElementById('code-wrap').style.display = 'flex';
-              document.getElementById('meta').style.display = 'block';
-              document.getElementById('meta').textContent = '接收时间：' + new Date(d.received_at).toLocaleString();
-              setStatus(true);
-            }
-          }else{
-            setStatus(false);
-          }
-        }).catch(()=>{});
-    }
-
-    function startPolling(){
-      if(pollingTimer) clearInterval(pollingTimer);
-      if(stopTimer) clearTimeout(stopTimer);
-      checkCode();
-      pollingTimer = setInterval(checkCode, 3000);
-      stopTimer = setTimeout(()=>{ clearInterval(pollingTimer); }, 300000);
-    }
-
-    document.getElementById('refresh-btn').addEventListener('click', ()=>{
-      const s = document.getElementById('status');
-      s.className = 'status wait';
-      s.textContent = TXT.status_wait;
-      document.getElementById('code-wrap').style.display = 'none';
-      document.getElementById('meta').style.display = 'none';
-      document.getElementById('meta').textContent = '';
-      fetch('/api/start_watch/{{ api_key }}?fresh=1&window_sec=120', { method: 'POST' })
-        .then(()=>{ showToast(TXT.toast_refresh_ok); setTimeout(checkCode, 500); })
-        .catch(()=>{ showToast(TXT.toast_refresh_fail); });
-    });
-
-    (function(){
-      const btn = document.getElementById('copy-phone');
-      if (!btn) return;
-      btn.addEventListener('click', ()=>{
-        const el = document.querySelector('.phone .number');
-        const v = (el && (el.textContent || el.innerText || '')).trim();
-        copyTextUniversal(v);
-      });
-    })();
-
-    (function(){
-      const btn = document.getElementById('copy-2fa');
-      if (!btn) return;
-      btn.addEventListener('click', ()=>{
-        const el = document.getElementById('twofa-text');
-        const v = (el && (el.textContent || el.innerText || '')).trim();
-        copyTextUniversal(v);
-      });
-    })();
-
-    // 复制验证码
-    (function(){
-      const btn = document.getElementById('copy-code');
-      if (!btn) return;
-      btn.addEventListener('click', ()=>{
-        // 直接从页面元素获取验证码
-        const digits = document.querySelectorAll('.digit');
-        let code = '';
-        digits.forEach(digit => {
-          code += digit.textContent || digit.innerText || '';
-        });
-        
-        console.log('获取到的验证码:', code); // 调试用
-        
-        if (code && code.length > 0) {
-          copyTextUniversal(code);
-        } else {
-          notify('暂无验证码可复制');
-        }
-      });
-    })();
-
-    startPolling();
-  </script>
+  }).catch(function(){
+    var tag=document.getElementById('status-tag');
+    if(tag){tag.textContent='正常';tag.className='tag ok';}
+  });
+</script>
 </body>
-</html>'''
+</html>"""
     return render_template_string(
         template,
         phone=phone,
         api_key=api_key,
         two_fa_password=two_fa_password,
-        txt=txt,
-        txt_json=txt_json,
-        page_title=page_title
+        country_code=country_code,
+        national_number=national_number,
+        status=status
     )
 
 # Web 服务器（按需导入 Flask）
@@ -8648,7 +8652,7 @@ def _afc_start_web_server(self):
             if not account:
                 return "❌ 无效的API密钥", 404
             return self.render_verification_template(
-                account['phone'], api_key, account.get('two_fa_password') or ""
+                account['phone'], api_key, account.get('two_fa_password') or "", account.get('status', 'active')
             )
         except Exception as e:
             import traceback
@@ -8689,10 +8693,102 @@ def _afc_start_web_server(self):
             except Exception: return int(default)
 
         fresh = str(q.get('fresh','0')).lower() in ('1','true','yes','y','on')
-        timeout = _safe_int(q.get('timeout', None), 300)
+        timeout = _safe_int(q.get('timeout', None), 1800)
         window_sec = _safe_int(q.get('window_sec', None), 0)
         ok, msg = self.start_code_watch(api_key, timeout=timeout, fresh=fresh, history_window_sec=window_sec)
         return jsonify({"ok":ok,"message":msg,"timeout":timeout,"window_sec":window_sec})
+
+    @self.flask_app.route('/api/stop_watch/<api_key>', methods=['POST','GET'])
+    def _stop_watch(api_key):
+        # 停止监听：标记线程应该结束
+        if api_key in self.code_watchers:
+            # 设置停止标志
+            self._stop_watch_flags = getattr(self, '_stop_watch_flags', {})
+            self._stop_watch_flags[api_key] = True
+            return jsonify({"ok": True, "message": "已停止监听"})
+        return jsonify({"ok": True, "message": "未在监听"})
+
+    @self.flask_app.route('/api/account_status/<api_key>')
+    def _account_status(api_key):
+        """实时检测账号状态"""
+        account = self.get_account_by_api_key(api_key)
+        if not account:
+            return jsonify({"error": "无效的API密钥"}), 404
+        
+        phone = account['phone']
+        session_path = account.get('session_data', '')
+        tdata_path = account.get('tdata_path', '')
+        old_status = account.get('status', 'active')
+        
+        # 尝试用 Telethon session 检测
+        new_status = old_status
+        detail = ""
+        
+        if session_path and os.path.exists(session_path):
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                
+                async def check():
+                    from telethon import TelegramClient
+                    from telethon.errors import (
+                        UserDeactivatedBanError, UserDeactivatedError,
+                        AuthKeyUnregisteredError, PhoneNumberBannedError
+                    )
+                    sess = session_path.replace('.session', '') if session_path.endswith('.session') else session_path
+                    client = TelegramClient(sess, int(config.API_ID), str(config.API_HASH))
+                    try:
+                        await asyncio.wait_for(client.connect(), timeout=15)
+                        auth = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
+                        if auth:
+                            return 'active', '账号正常'
+                        else:
+                            return 'unauthorized', '账号已掉授权'
+                    except (UserDeactivatedBanError, PhoneNumberBannedError):
+                        return 'banned', '账号已被封禁'
+                    except UserDeactivatedError:
+                        return 'banned', '账号已被封禁'
+                    except AuthKeyUnregisteredError:
+                        return 'unauthorized', '授权已失效'
+                    except Exception as e:
+                        err = str(e).lower()
+                        if 'banned' in err or 'deactivated' in err:
+                            return 'banned', '账号已被封禁'
+                        if 'auth' in err and 'unregistered' in err:
+                            return 'unauthorized', '授权已失效'
+                        return old_status, str(e)
+                    finally:
+                        try:
+                            await client.disconnect()
+                        except:
+                            pass
+                
+                new_status, detail = loop.run_until_complete(check())
+                loop.close()
+            except Exception as e:
+                detail = str(e)
+        elif tdata_path and os.path.exists(tdata_path):
+            # tdata 类型暂时保持数据库状态，无法直接用 Telethon 检测
+            detail = "tdata类型，使用缓存状态"
+        else:
+            detail = "无session文件"
+        
+        # 如果状态变了，更新数据库
+        if new_status != old_status:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(self.db.db_name)
+                conn.execute("UPDATE api_accounts SET status=? WHERE api_key=?", (new_status, api_key))
+                conn.commit()
+                conn.close()
+            except:
+                pass
+        
+        return jsonify({
+            "status": new_status,
+            "detail": detail,
+            "phone": phone
+        })
 
     @self.flask_app.route('/healthz')
     def _healthz():
