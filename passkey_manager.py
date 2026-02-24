@@ -829,6 +829,7 @@ class PasskeyManager:
             rawId         - 原始凭证 ID bytes
             clientDataJSON  - bytes
             attestationObject - bytes
+            userHandle    - base64url 编码的 user.id（登录时必须返回）
         """
         try:
             from cryptography.hazmat.primitives.asymmetric import ec
@@ -839,9 +840,9 @@ class PasskeyManager:
 
         # 解包 publicKey 层（Telegram 返回的 options 有一层 publicKey 包装）
         options = options.get("publicKey", options)
+        
         # 解析 options 中的必要字段
         challenge_raw = options.get('challenge', '')
-        # challenge 可能是 base64url 编码的字节串
         if isinstance(challenge_raw, str):
             challenge_bytes = _b64url_decode(challenge_raw)
         else:
@@ -850,6 +851,25 @@ class PasskeyManager:
         rp_info = options.get('rp', {})
         rp_id = rp_info.get('id', 'telegram.org')
         origin = "https://web.telegram.org"
+
+        # ★★★ 关键：提取并保存 user.id (这就是 userHandle) ★★★
+        user_info = options.get('user', {})
+        user_id_raw = user_info.get('id', '')
+        if isinstance(user_id_raw, str):
+            user_handle_bytes = _b64url_decode(user_id_raw)
+            user_handle_b64 = user_id_raw
+        elif isinstance(user_id_raw, (list, tuple)):
+            user_handle_bytes = bytes(user_id_raw)
+            user_handle_b64 = _b64url_encode(user_handle_bytes)
+        elif isinstance(user_id_raw, bytes):
+            user_handle_bytes = user_id_raw
+            user_handle_b64 = _b64url_encode(user_handle_bytes)
+        else:
+            user_handle_bytes = b''
+            user_handle_b64 = ''
+        
+        logger.info(f"[Passkey] user.id (userHandle): {user_handle_b64}")
+        print(f"[Passkey] userHandle: {user_handle_b64} ({len(user_handle_bytes)} bytes)")
 
         # 1. 生成 EC P-256 密钥对
         private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
@@ -903,11 +923,12 @@ class PasskeyManager:
         logger.info("[Passkey] FIDO2 凭证生成成功 id=%s", cred_id_b64[:16])
         return {
             'id': cred_id_b64,
-            'rawId': credential_id,           # bytes, kept for reference
-            'rawIdB64': cred_id_b64,          # string (base64url), for raw_id:string
+            'rawId': credential_id,
+            'rawIdB64': cred_id_b64,
             'clientDataJSON': client_data_json,
             'attestationObject': attestation_object,
-            'privateKeyPem': private_key_pem, # 私钥，登录时签名用
+            'privateKeyPem': private_key_pem,
+            'userHandle': user_handle_b64,  # ★★★ 新增 ★★★
         }
 
     # ------------------------------------------------------------------
@@ -952,30 +973,23 @@ class PasskeyManager:
     # ------------------------------------------------------------------
     async def _create_passkey_for_account(
         self, client, passkey_name: str = "Telegram"
-    ) -> Tuple[bool, str, str, str]:
-        """
-        组合三步完成 Passkey 创建，返回 (success, passkey_id, error, private_key_pem)
-        """
-        # Step 1: 获取注册选项
+    ) -> Tuple[bool, str, str, str, str]:
+        """返回 (success, passkey_id, error, private_key_pem, user_handle)"""
         try:
             options = await self._init_passkey_registration(client)
         except asyncio.TimeoutError:
-            msg = f"initPasskeyRegistration 超时({INIT_PASSKEY_TIMEOUT}s)"
-            logger.error("[Passkey] %s", msg)
-            return False, "", msg, ""
+            return False, "", f"initPasskeyRegistration 超时({INIT_PASSKEY_TIMEOUT}s)", "", ""
         except Exception as e:
-            logger.warning("[Passkey] initPasskeyRegistration 失败: %s", e)
-            return False, "", str(e), ""
+            return False, "", str(e), "", ""
 
-        # Step 2: 软件模拟生成 FIDO2 凭证
         try:
             credential = self._build_fido2_credential(options, passkey_name)
         except Exception as e:
-            logger.error("[Passkey] 生成FIDO2凭证失败: %s", e, exc_info=True)
-            return False, "", f"生成凭证失败: {e}", ""
+            return False, "", f"生成凭证失败: {e}", "", ""
 
-        # Step 3: 提交注册
-        return await self._register_passkey(client, credential)
+        success, pk_id, error, priv_pem = await self._register_passkey(client, credential)
+        user_handle = credential.get('userHandle', '')
+        return success, pk_id, error, priv_pem, user_handle
 
     # ------------------------------------------------------------------
     # 公共接口：批量创建 Passkey
@@ -1132,13 +1146,14 @@ class PasskeyManager:
             # 4. 创建 Passkey
             logger.info("[Passkey] %s: 开始创建Passkey...", file_name)
             print(f"[Passkey]   {file_name}: 创建Passkey...")
-            success, pk_id, error, priv_pem = await self._create_passkey_for_account(
+            success, pk_id, error, priv_pem, user_handle = await self._create_passkey_for_account(
                 client, passkey_name
             )
             if success:
                 result.status = 'created'
                 result.passkey_id = pk_id
                 result.private_key_pem = priv_pem
+                result.user_handle = user_handle
                 logger.info("[Passkey] %s: Passkey 创建成功 id=%s",
                             file_name, pk_id[:16] if pk_id else '')
                 print(f"[Passkey]   {file_name}: ✓ Passkey 创建成功")
@@ -1533,6 +1548,7 @@ class PasskeyManager:
                         "passkey_id": r.passkey_id,
                         "passkey_name": r.passkey_name,
                         "private_key_pem": r.private_key_pem,
+                        "user_handle": r.user_handle,  # ★★★ 新增 ★★★
                         "created_at": time.strftime('%Y-%m-%d %H:%M:%S'),
                     }
                     zf.writestr(
@@ -1748,7 +1764,7 @@ class PasskeyManager:
         ]
 
         label_map = {
-            'no_passkey': '无Passkey_干净账号',
+            'no_passkey': '无Passkey_',
             'deleted':    '已删除Passkey',
             'failed':     '失败',
         }
