@@ -33,7 +33,7 @@ ACCOUNT_TOTAL_TIMEOUT = 120  # 单账号整体超时
 # ---------------------------------------------------------------------------
 try:
     from telethon import TelegramClient
-    from telethon.tl.core import TLObject
+    from telethon.tl.tlobject import TLObject
     TELETHON_AVAILABLE = True
 except ImportError:
     TELETHON_AVAILABLE = False
@@ -74,17 +74,62 @@ except ImportError:
 # 原始 TL 构造器（兼容旧版 Telethon，当官方 Request 类不存在时使用）
 # ---------------------------------------------------------------------------
 def _make_get_passkeys_request():
-    """构造 account.GetPasskeys 原始请求（CONSTRUCTOR_ID = 0x1e16e712）"""
+    """构造 account.GetPasskeys 原始请求（CONSTRUCTOR_ID = 0xea1f0c52）"""
     if _HAS_GET_PASSKEYS:
         return GetPasskeysRequest()
 
     if not TELETHON_AVAILABLE:
         raise RuntimeError("Telethon 未安装")
 
-    from telethon.tl.tlobject import TLObject as _TLObject
+    from telethon.tl.tlobject import TLRequest as _TLObject
+
+    from telethon.tl import TLObject as _TLBase
+    import telethon.tl.core as _core
+
+    class _Passkey(_TLObject):
+        CONSTRUCTOR_ID = 0x98613ebf
+        SUBCLASS_OF_ID = 0x98613ebf
+
+        def __init__(self, id='', name='', date=0, flags=0,
+                     software_emoji_id=None, last_usage_date=None):
+            self.id = id
+            self.name = name
+            self.date = date
+            self.flags = flags
+            self.software_emoji_id = software_emoji_id
+            self.last_usage_date = last_usage_date
+
+        @classmethod
+        def from_reader(cls, reader):
+            flags = reader.read_int()
+            id_ = reader.tgread_string()
+            name = reader.tgread_string()
+            date = reader.read_int()
+            software_emoji_id = reader.read_long() if flags & 1 else None
+            last_usage_date = reader.read_int() if flags & 2 else None
+            return cls(id=id_, name=name, date=date, flags=flags,
+                       software_emoji_id=software_emoji_id,
+                       last_usage_date=last_usage_date)
+
+    class _AccountPasskeys(_TLObject):
+        CONSTRUCTOR_ID = 0xf8e0aa1c
+        SUBCLASS_OF_ID = 0xf8e0aa1c
+
+        def __init__(self, passkeys=None):
+            self.passkeys = passkeys or []
+
+        @classmethod
+        def from_reader(cls, reader):
+            passkeys = reader.tgread_vector()
+            return cls(passkeys=passkeys)
+
+    # 注册到 Telethon
+    from telethon.tl.alltlobjects import tlobjects
+    tlobjects[_Passkey.CONSTRUCTOR_ID] = _Passkey
+    tlobjects[_AccountPasskeys.CONSTRUCTOR_ID] = _AccountPasskeys
 
     class _GetPasskeysRequest(_TLObject):
-        CONSTRUCTOR_ID = 0x1e16e712
+        CONSTRUCTOR_ID = 0xea1f0c52
         SUBCLASS_OF_ID = 0x5c4a9289
 
         def __init__(self):
@@ -101,17 +146,17 @@ def _make_get_passkeys_request():
 
 
 def _make_delete_passkey_request(passkey_id: str):
-    """构造 account.DeletePasskey 原始请求（CONSTRUCTOR_ID = 0xd54f424a）"""
+    """构造 account.DeletePasskey 原始请求（CONSTRUCTOR_ID = 0xf5b5563f）"""
     if _HAS_DELETE_PASSKEY:
         return DeletePasskeyRequest(id=passkey_id)
 
     if not TELETHON_AVAILABLE:
         raise RuntimeError("Telethon 未安装")
 
-    from telethon.tl.tlobject import TLObject as _TLObject
+    from telethon.tl.tlobject import TLRequest as _TLObject
 
     class _DeletePasskeyRequest(_TLObject):
-        CONSTRUCTOR_ID = 0xd54f424a
+        CONSTRUCTOR_ID = 0xf5b5563f
         SUBCLASS_OF_ID = 0xf5b399ac
 
         def __init__(self, id: str):
@@ -591,7 +636,7 @@ class PasskeyManager:
 
             label = label_map[cat_key]
             count = len(cat_results)
-            zip_name = f"{label}_{count}个_{task_id}.zip"
+            zip_name = f"{label}_{count}个.zip"
             zip_path = os.path.join(base_dir, zip_name)
 
             # 构建报告文本
@@ -656,7 +701,7 @@ class PasskeyManager:
 
             size = os.path.getsize(zip_path)
             caption_map = {
-                'no_passkey': f"🔓 无Passkey（干净账号）：{count} 个",
+                'no_passkey': f"🔓 无Passkey：{count} 个",
                 'deleted':    f"✅ 已删除Passkey：{count} 个",
                 'failed':     f"❌ 处理失败：{count} 个",
             }
