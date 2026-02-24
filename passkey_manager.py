@@ -475,6 +475,36 @@ class PasskeyResult:
     elapsed: float = 0.0
 
 
+def _extract_2fa_from_json(json_path: str) -> str:
+    """
+    从同名 JSON 文件中提取 2FA 密码。
+    支持多种字段名（不区分大小写）：
+    two2fa, password2fa, 2fa, twofa, two_fa, password_2fa,
+    twofactor, two_factor, twofa_password, 2fa_password,
+    cloud_password, password
+    """
+    _2FA_KEYS = [
+        'two2fa', 'password2fa', '2fa', 'twofa', 'two_fa', 'password_2fa',
+        'twofactor', 'two_factor', 'twofa_password', '2fa_password',
+        'cloud_password', 'password',
+    ]
+    try:
+        if not os.path.isfile(json_path):
+            return ''
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return ''
+        lower_data = {k.lower(): v for k, v in data.items()}
+        for key in _2FA_KEYS:
+            val = lower_data.get(key, '')
+            if val:
+                return str(val)
+    except Exception:
+        pass
+    return ''
+
+
 @dataclass
 class PasskeyCreateResult:
     account_name: str
@@ -484,6 +514,8 @@ class PasskeyCreateResult:
     passkey_id: str = ""
     passkey_name: str = ""
     private_key_pem: str = ""  # EC P-256 私钥 PEM，登录时签名用
+    user_handle: str = ""      # userHandle base64url
+    password_2fa: str = ""     # 2FA 密码
     error: Optional[str] = None
     elapsed: float = 0.0
 
@@ -499,6 +531,8 @@ class PasskeyLoginResult:
     status: str = "pending"     # pending / success / failed
     error: Optional[str] = None
     elapsed: float = 0.0
+    password_2fa: str = ""
+    json_file: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1001,6 +1035,7 @@ class PasskeyManager:
         passkey_name: str = "Telegram",
         progress_callback=None,
         concurrent: int = DEFAULT_CONCURRENT,
+        default_2fa: str = None,
     ) -> Dict[str, List[PasskeyCreateResult]]:
         """批量为多个账号创建 Passkey，返回分类结果字典"""
         total = len(files)
@@ -1016,7 +1051,8 @@ class PasskeyManager:
             nonlocal done_count
             async with semaphore:
                 result = await self._create_one(file_path, file_name,
-                                                file_type, passkey_name)
+                                                file_type, passkey_name,
+                                                default_2fa)
                 results.append(result)
                 done_count += 1
                 status_icon = {'created': '✅', 'failed': '❌'}.get(
@@ -1058,7 +1094,7 @@ class PasskeyManager:
 
     async def _create_one(
         self, file_path: str, file_name: str, file_type: str,
-        passkey_name: str
+        passkey_name: str, default_2fa: str = None
     ) -> PasskeyCreateResult:
         """处理单个账号的 Passkey 创建，带整体超时保护"""
         start = time.time()
@@ -1068,7 +1104,7 @@ class PasskeyManager:
         try:
             result = await asyncio.wait_for(
                 self._create_one_inner(file_path, file_name, file_type,
-                                       passkey_name),
+                                       passkey_name, default_2fa),
                 timeout=ACCOUNT_TOTAL_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -1096,11 +1132,17 @@ class PasskeyManager:
 
     async def _create_one_inner(
         self, file_path: str, file_name: str, file_type: str,
-        passkey_name: str
+        passkey_name: str, default_2fa: str = None
     ) -> PasskeyCreateResult:
         """实际创建逻辑（由 _create_one 包裹整体超时）"""
         result = PasskeyCreateResult(account_name=file_name, file_type=file_type,
                                      passkey_name=passkey_name)
+        # 提取 2FA 密码
+        password_2fa = default_2fa or ""
+        if not password_2fa:
+            json_path = file_path.replace('.session', '.json')
+            password_2fa = _extract_2fa_from_json(json_path)
+        result.password_2fa = password_2fa
         start = time.time()
         client = None
         temp_session = None
@@ -1187,12 +1229,13 @@ class PasskeyManager:
         return result
 
     # ------------------------------------------------------------------
-    # 公共接口：Passkey 登录 → 导出 Session
+    # 公共接口：Passkey 登录 → 导出 Web Session（Playwright 浏览器方式）
     # ------------------------------------------------------------------
     async def passkey_login_from_file(self, passkey_file_path: str) -> dict:
         """
-        读取 .passkey JSON 文件，用私钥签名完成 Telegram WebAuthn 登录，
-        返回 {success, phone, user_id, first_name, username, session_string, error}
+        读取 .passkey JSON 文件，使用 Playwright 浏览器模拟 WebAuthn 完成登录，
+        返回 {success, phone, user_id, first_name, username, session_string,
+               password_2fa, json_file, web_json, error}
         """
         start = time.time()
         result = {
@@ -1202,16 +1245,30 @@ class PasskeyManager:
             'first_name': '',
             'username': '',
             'session_string': '',
+            'password_2fa': '',
+            'json_file': '',
+            'web_json': None,
             'error': '',
         }
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            result['error'] = 'playwright 未安装，请执行: pip install playwright && playwright install chromium'
+            result['elapsed'] = round(time.time() - start, 1)
+            return result
 
         try:
             with open(passkey_file_path, 'r', encoding='utf-8') as f:
                 pk_data = json.load(f)
 
-            passkey_id = pk_data.get('passkey_id', '')
-            priv_pem   = pk_data.get('private_key_pem', '')
-            phone      = pk_data.get('phone', '')
+            passkey_id  = pk_data.get('passkey_id', '')
+            priv_pem    = pk_data.get('private_key_pem', '')
+            user_handle = pk_data.get('user_handle', '')
+            phone       = pk_data.get('phone', '')
+            password_2fa = pk_data.get('password_2fa', '')
+
+            result['password_2fa'] = password_2fa
 
             if not priv_pem:
                 result['error'] = '私钥为空，旧版注册未保存私钥'
@@ -1220,118 +1277,219 @@ class PasskeyManager:
                 result['error'] = 'passkey_id 为空'
                 return result
 
-            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives import serialization, hashes
             from cryptography.hazmat.primitives.asymmetric import ec
-            from cryptography.hazmat.primitives import hashes
             from cryptography.hazmat.backends import default_backend
-            from telethon import TelegramClient
-            from telethon.sessions import StringSession
 
             private_key = serialization.load_pem_private_key(
                 priv_pem.encode(), password=None, backend=default_backend()
             )
 
-            api_id, api_hash = self._get_api_credentials()
+            # WebAuthn Hook JS：拦截 navigator.credentials.get()，用本地私钥签名
+            def _make_webauthn_hook(cred_id_b64: str, user_handle_b64: str) -> str:
+                return f"""
+(function() {{
+    const _origCreate = navigator.credentials.create.bind(navigator.credentials);
+    const _origGet    = navigator.credentials.get.bind(navigator.credentials);
+
+    navigator.credentials.get = async function(options) {{
+        const pk = options && options.publicKey;
+        if (!pk) return _origGet(options);
+
+        const challengeB64 = btoa(String.fromCharCode(...new Uint8Array(pk.challenge)))
+            .replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+
+        // 通知 Python 注入 challenge
+        window.__webauthn_challenge__ = challengeB64;
+
+        // 等待 Python 完成签名
+        const deadline = Date.now() + 30000;
+        while (!window.__webauthn_result__ && Date.now() < deadline) {{
+            await new Promise(r => setTimeout(r, 100));
+        }}
+
+        if (!window.__webauthn_result__) {{
+            throw new Error('WebAuthn hook: sign timeout');
+        }}
+
+        const r = window.__webauthn_result__;
+        window.__webauthn_result__ = null;
+
+        function b64ToArr(b64) {{
+            const s = atob(b64.replace(/-/g,'+').replace(/_/g,'/'));
+            return Uint8Array.from(s, c => c.charCodeAt(0));
+        }}
+
+        return {{
+            id: r.id,
+            rawId: b64ToArr(r.rawId).buffer,
+            type: 'public-key',
+            response: {{
+                clientDataJSON:    b64ToArr(r.clientDataJSON).buffer,
+                authenticatorData: b64ToArr(r.authenticatorData).buffer,
+                signature:         b64ToArr(r.signature).buffer,
+                userHandle:        r.userHandle ? b64ToArr(r.userHandle).buffer : null,
+            }},
+            getClientExtensionResults: () => ({{}}),
+        }};
+    }};
+}})();
+"""
+
             proxy_dict = self._get_proxy()
-            kwargs = {'proxy': proxy_dict} if proxy_dict else {}
+            playwright_proxy = None
+            if proxy_dict:
+                ptype = (proxy_dict.get('proxy_type') or 'socks5').lower()
+                phost = proxy_dict.get('addr', '')
+                pport = proxy_dict.get('port', 1080)
+                puser = proxy_dict.get('username', '')
+                ppass = proxy_dict.get('password', '')
+                scheme = 'socks5' if 'socks5' in ptype else ('socks4' if 'socks4' in ptype else 'http')
+                server = f"{scheme}://{phost}:{pport}"
+                playwright_proxy = {'server': server}
+                if puser:
+                    playwright_proxy['username'] = puser
+                if ppass:
+                    playwright_proxy['password'] = ppass
 
-            client = TelegramClient(StringSession(), api_id, api_hash, **kwargs)
-            try:
-                await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT)
+            hook_js = _make_webauthn_hook(passkey_id, user_handle)
 
-                # 1. initPasskeyLogin → 获取 challenge
-                if _InitPasskeyLoginRequest is None:
-                    _register_login_tl_classes()
-                init_req = _InitPasskeyLoginRequest()
-                response = await asyncio.wait_for(
-                    client(init_req), timeout=INIT_PASSKEY_TIMEOUT
-                )
-                if hasattr(response, 'data'):
-                    raw = response.data
-                elif isinstance(response, str):
-                    raw = response
-                else:
-                    raw = str(response)
-                options = json.loads(raw)
+            async with async_playwright() as pw:
+                launch_kwargs = {'headless': True}
+                if playwright_proxy:
+                    launch_kwargs['proxy'] = playwright_proxy
 
-                options = options.get('publicKey', options)
-                challenge_raw = options.get('challenge', '')
-                if isinstance(challenge_raw, str):
-                    challenge_bytes = _b64url_decode(challenge_raw)
-                else:
-                    challenge_bytes = bytes(challenge_raw)
+                browser = await pw.chromium.launch(**launch_kwargs)
+                context = await browser.new_context()
 
-                rp_info = options.get('rp', {})
-                rp_id = rp_info.get('id', 'telegram.org')
+                # 注入 WebAuthn Hook 到所有页面
+                await context.add_init_script(hook_js)
+
+                page = await context.new_page()
+                await page.goto('https://web.telegram.org/a/', timeout=60000)
+
+                # 等待并点击 PASSKEY 按钮（Sign in with a Passkey）
+                try:
+                    passkey_btn = page.locator('button:has-text("PASSKEY"), button:has-text("Passkey"), [data-passkey], .btn-passkey')
+                    await passkey_btn.first.wait_for(timeout=30000)
+                    await passkey_btn.first.click()
+                except Exception:
+                    # 备用：查找包含 passkey 文字的可点击元素
+                    try:
+                        await page.click('text=PASSKEY', timeout=15000)
+                    except Exception:
+                        await page.click('text=Passkey', timeout=15000)
+
+                # 等待 JS Hook 捕获到 challenge
+                challenge_b64 = None
+                for _ in range(300):  # 最多等待 30 秒
+                    val = await page.evaluate('window.__webauthn_challenge__')
+                    if val:
+                        challenge_b64 = val
+                        break
+                    await asyncio.sleep(0.1)
+
+                if not challenge_b64:
+                    result['error'] = '等待 WebAuthn challenge 超时'
+                    await browser.close()
+                    return result
+
+                # 用私钥签名 challenge
+                challenge_bytes = _b64url_decode(challenge_b64)
+                rp_id = 'telegram.org'
                 origin = 'https://web.telegram.org'
 
-                # 2. 构造 clientDataJSON (type="webauthn.get")
                 client_data = {
                     'type': 'webauthn.get',
-                    'challenge': challenge_raw if isinstance(challenge_raw, str)
-                                 else _b64url_encode(challenge_bytes),
+                    'challenge': challenge_b64,
                     'origin': origin,
                     'crossOrigin': False,
                 }
-                client_data_json = json.dumps(
-                    client_data, separators=(',', ':')
-                ).encode()
-
-                # 3. 构造 authenticatorData = SHA256(rpId) + flags(0x05) + counter(0)
+                client_data_json = json.dumps(client_data, separators=(',', ':')).encode()
                 rp_id_hash = hashlib.sha256(rp_id.encode()).digest()
-                flags = struct.pack('B', 0x05)          # UP(0x01) | UV(0x04)
-                sign_count = struct.pack('>I', 0)
-                authenticator_data = rp_id_hash + flags + sign_count
+                auth_data = rp_id_hash + struct.pack('B', 0x05) + struct.pack('>I', 0)
 
-                # 4. 签名：ECDSA P-256 SHA-256(authData || SHA256(clientDataJSON))
                 client_data_hash = hashlib.sha256(client_data_json).digest()
-                signed_data = authenticator_data + client_data_hash
-                signature = private_key.sign(
-                    signed_data, ec.ECDSA(hashes.SHA256())
-                )
+                signed_data = auth_data + client_data_hash
+                signature_der = private_key.sign(signed_data, ec.ECDSA(hashes.SHA256()))
 
-                # 5. 构造登录凭证并提交 finishPasskeyLogin
-                login_resp = _InputPasskeyResponseLogin(
-                    client_data_json=client_data_json,
-                    authenticator_data=authenticator_data,
-                    signature=signature,
-                )
-                # Reuse _InputPasskeyCredential (same constructor as registration)
-                cred = _InputPasskeyCredential(
-                    id=passkey_id,
-                    raw_id=passkey_id,
-                    response=login_resp,
-                )
-                finish_req = _FinishPasskeyLoginRequest(credential=cred)
-                auth = await asyncio.wait_for(
-                    client(finish_req), timeout=REGISTER_PASSKEY_TIMEOUT
-                )
-                logger.info("[Passkey] finishPasskeyLogin 成功: %s", auth)
+                webauthn_result = {
+                    'id': passkey_id,
+                    'rawId': passkey_id,
+                    'clientDataJSON': _b64url_encode(client_data_json),
+                    'authenticatorData': _b64url_encode(auth_data),
+                    'signature': _b64url_encode(signature_der),
+                    'userHandle': user_handle if user_handle else None,
+                }
+                await page.evaluate(f'window.__webauthn_result__ = {json.dumps(webauthn_result)}')
 
-                # 6. 获取用户信息
+                # 等待 2FA 输入框（如需）
+                if password_2fa:
+                    try:
+                        pwd_input = page.locator('input[type=password], input.password-input, .input-field-password input')
+                        await pwd_input.first.wait_for(timeout=15000)
+                        await pwd_input.first.fill(password_2fa)
+                        await page.keyboard.press('Enter')
+                    except Exception:
+                        pass
+
+                # 等待登录成功（出现主界面元素）
                 try:
-                    me = await asyncio.wait_for(
-                        client.get_me(), timeout=GET_ME_TIMEOUT
-                    )
-                    if me:
-                        result['phone'] = getattr(me, 'phone', phone) or phone
-                        result['user_id'] = getattr(me, 'id', 0) or 0
-                        result['first_name'] = getattr(me, 'first_name', '') or ''
-                        result['username'] = getattr(me, 'username', '') or ''
-                except Exception:
-                    result['phone'] = phone
-
-                # 7. 导出 session string
-                result['session_string'] = client.session.save()
-                result['success'] = True
-
-            finally:
-                try:
-                    await asyncio.wait_for(
-                        client.disconnect(), timeout=DISCONNECT_TIMEOUT
-                    )
+                    await page.wait_for_selector('.chat-list, #column-left .chatlist, .sidebar-left', timeout=60000)
                 except Exception:
                     pass
+
+                # 提取 localStorage
+                local_storage = await page.evaluate('''() => {
+                    const obj = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        obj[k] = localStorage.getItem(k);
+                    }
+                    return obj;
+                }''')
+
+                # 提取用户信息
+                user_info = {}
+                try:
+                    user_info = await page.evaluate('''() => {
+                        try {
+                            const keys = Object.keys(localStorage);
+                            for (const k of keys) {
+                                try {
+                                    const v = JSON.parse(localStorage.getItem(k));
+                                    if (v && v.id && v.firstName !== undefined) return v;
+                                } catch(e) {}
+                            }
+                        } catch(e) {}
+                        return {};
+                    }''')
+                except Exception:
+                    pass
+
+                result['success'] = True
+                result['phone'] = phone
+                result['user_id'] = user_info.get('id', 0)
+                result['first_name'] = user_info.get('firstName', '') or user_info.get('first_name', '')
+                result['username'] = user_info.get('username', '')
+
+                # 构造 web_json（包含 localStorage 和用户信息）
+                web_json_data = {
+                    'phone': phone,
+                    'user_id': result['user_id'],
+                    'first_name': result['first_name'],
+                    'username': result['username'],
+                    'password_2fa': password_2fa,
+                    'localStorage': local_storage,
+                }
+                result['web_json'] = web_json_data
+
+                # 生成 json_file 名（{phone}_web.json）
+                file_stem = phone.strip() if phone else os.path.splitext(
+                    os.path.basename(passkey_file_path))[0]
+                result['json_file'] = f"{file_stem}_web.json"
+
+                await browser.close()
 
         except Exception as e:
             logger.error("[Passkey] passkey_login_from_file 失败: %s", e,
@@ -1373,6 +1531,10 @@ class PasskeyManager:
                         r.first_name = data.get('first_name', '')
                         r.username = data.get('username', '')
                         r.session_string = data.get('session_string', '')
+                        r.password_2fa = data.get('password_2fa', '')
+                        r.json_file = data.get('json_file', '')
+                        # 保存 web_json 到结果供打包使用
+                        r._web_json = data.get('web_json')
                     else:
                         r.status = 'failed'
                         r.error = data.get('error') or 'unknown error'
@@ -1424,48 +1586,75 @@ class PasskeyManager:
         task_id: str,
     ) -> List[Tuple[str, str, str, int]]:
         """
-        成功的账号：每个生成 {phone}_session.json，打包到 passkey_sessions.zip
+        成功的账号：
+          - 每个生成 {phone}_web.json（包含 localStorage 和用户信息）
+          - 每个生成 {phone}_session.json（包含用户信息和 password_2fa）
+          - 两类文件分别打包到 passkey_web.zip 和 passkey_sessions.zip
         失败的账号：生成失败报告 passkey_login_failed.zip
         返回: [(zip_path, filename, caption, size_bytes), ...]
         """
-        api_id, api_hash = self._get_api_credentials()
         logger.info("[Passkey] 开始打包登录结果文件 task_id=%s", task_id)
         print("[Passkey] 📦 打包登录结果文件...")
         output = []
         base_dir = tempfile.mkdtemp(prefix=f"passkey_login_{task_id}_")
 
-        # ── 成功：生成 {phone}_session.json 并打包 ───────────────────────
+        # ── 成功：生成 _web.json 和 _session.json 并打包 ─────────────────
         success_results = results.get('success', [])
         if success_results:
-            zip_name = "passkey_sessions.zip"
-            zip_path = os.path.join(base_dir, zip_name)
             count = len(success_results)
 
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # _web.json 文件打包
+            web_zip_name = "passkey_web.zip"
+            web_zip_path = os.path.join(base_dir, web_zip_name)
+            # _session.json 文件打包
+            ses_zip_name = "passkey_sessions.zip"
+            ses_zip_path = os.path.join(base_dir, ses_zip_name)
+
+            with (zipfile.ZipFile(web_zip_path, 'w', zipfile.ZIP_DEFLATED) as web_zf,
+                  zipfile.ZipFile(ses_zip_path, 'w', zipfile.ZIP_DEFLATED) as ses_zf):
                 for r in success_results:
                     phone = r.phone.strip() if r.phone else ""
                     file_stem = phone if phone else os.path.splitext(r.passkey_file)[0]
-                    json_filename = f"{file_stem}_session.json"
 
+                    # _web.json
+                    web_json_data = getattr(r, '_web_json', None) or {}
+                    if not web_json_data:
+                        web_json_data = {
+                            'phone': r.phone,
+                            'user_id': r.user_id,
+                            'first_name': r.first_name,
+                            'username': r.username,
+                            'password_2fa': r.password_2fa,
+                        }
+                    web_filename = r.json_file or f"{file_stem}_web.json"
+                    web_zf.writestr(
+                        web_filename,
+                        json.dumps(web_json_data, ensure_ascii=False, indent=2).encode('utf-8'),
+                    )
+
+                    # _session.json
                     session_data = {
                         "phone": r.phone,
                         "user_id": r.user_id,
                         "first_name": r.first_name,
                         "username": r.username,
+                        "password_2fa": r.password_2fa,
                         "session_string": r.session_string,
-                        "api_id": api_id,
-                        "api_hash": api_hash,
                     }
-                    zf.writestr(
-                        json_filename,
+                    ses_zf.writestr(
+                        f"{file_stem}_session.json",
                         json.dumps(session_data, ensure_ascii=False, indent=2).encode('utf-8'),
                     )
 
-            size = os.path.getsize(zip_path)
-            caption = f"✅ 登录成功：{count} 个"
-            logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
-            print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
-            output.append((zip_path, zip_name, caption, size))
+            for zip_path, zip_name, caption_prefix in [
+                (web_zip_path, web_zip_name, "✅ Web登录成功"),
+                (ses_zip_path, ses_zip_name, "✅ Session登录成功"),
+            ]:
+                size = os.path.getsize(zip_path)
+                caption = f"{caption_prefix}：{count} 个"
+                logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
+                print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
+                output.append((zip_path, zip_name, caption, size))
 
         # ── 失败：打包失败报告 ───────────────────────────────────────────
         failed_results = results.get('failed', [])
@@ -1549,6 +1738,7 @@ class PasskeyManager:
                         "passkey_name": r.passkey_name,
                         "private_key_pem": r.private_key_pem,
                         "user_handle": r.user_handle,  # ★★★ 新增 ★★★
+                        "password_2fa": r.password_2fa,
                         "created_at": time.strftime('%Y-%m-%d %H:%M:%S'),
                     }
                     zf.writestr(
