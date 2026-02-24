@@ -8401,19 +8401,6 @@ body{
 }
 .status.waiting{background:#fff8e6;color:#f5a623}
 .status.done{background:#e8f5e9;color:#4caf50}
-.refresh-row{display:flex;justify-content:center;margin-top:16px}
-.refresh-btn{
-  background:linear-gradient(135deg,#06b6d4,#3b82f6);
-  color:#fff;
-  border:none;
-  border-radius:8px;
-  padding:10px 28px;
-  font-size:14px;
-  font-weight:600;
-  cursor:pointer;
-  -webkit-tap-highlight-color:transparent;
-}
-.refresh-btn:active{opacity:.8}
 .toast{
   position:fixed;left:50%;bottom:24px;
   transform:translateX(-50%) translateY(20px);
@@ -8470,11 +8457,7 @@ body{
   </div>
   {% endif %}
 
-  <div id="status" class="status waiting">读取验证码中...</div>
-
-  <div class="refresh-row">
-    <button class="refresh-btn" id="refresh-btn">刷新</button>
-  </div>
+  <div id="status" class="status waiting">等待验证码...</div>
 </div>
 
 <div id="toast" class="toast"></div>
@@ -8483,141 +8466,80 @@ body{
 var apiKey='{{ api_key }}';
 var PREFIX=window.location.pathname.split('/verify/')[0]||'';
 var codeValue='';
-var polling=null, toastT=null;
-var watchStarted=false;
 
-// 打开页面=启动监听（带历史回扫120秒）
-function startWatch(){
-  if(watchStarted)return;
-  watchStarted=true;
-  fetch(PREFIX+'/api/start_watch/'+apiKey+'?fresh=0&window_sec=120',{method:'POST'})
-    .then(function(){console.log('监听已启动')})
-    .catch(function(){console.log('监听启动失败')});
-}
+// 建立 SSE 连接，打开即监听，关闭即停止
+var evtSource = new EventSource(PREFIX+'/api/stream/'+apiKey);
 
-// 关闭/离开页面=停止监听
-function stopWatch(){
-  if(polling)clearInterval(polling);
-  polling=null;
-  watchStarted=false;
-  // 通知后端停止（用 sendBeacon 确保关闭页面时也能发出）
-  try{
-    navigator.sendBeacon(PREFIX+'/api/stop_watch/'+apiKey);
-  }catch(e){}
-}
-
-function toast(m,d){
-  var t=document.getElementById('toast');
-  if(!t)return;
-  t.textContent=m||'';
-  t.classList.add('show');
-  if(toastT)clearTimeout(toastT);
-  toastT=setTimeout(function(){t.classList.remove('show')},d||1500);
-}
-
-function cp(t,b){
-  if(!t)return;
-  try{
-    if(window.isSecureContext&&navigator.clipboard&&navigator.clipboard.writeText){
-      navigator.clipboard.writeText(t).then(function(){done(b)}).catch(function(){fb(t,b)});
-      return;
+evtSource.onmessage = function(e) {
+  try {
+    var d = JSON.parse(e.data);
+    if (d.code && d.code !== codeValue) {
+      codeValue = d.code;
+      var el = document.getElementById('code-val');
+      var hint = document.getElementById('code-hint');
+      var st = document.getElementById('status');
+      var copyBtn = document.getElementById('copy-code');
+      el.textContent = d.code;
+      el.className = 'val';
+      if (copyBtn) copyBtn.style.display = '';
+      if (hint) { hint.style.display = 'block'; hint.textContent = '收到于: ' + (d.time || ''); }
+      if (st) { st.className = 'status done'; st.textContent = '验证码已接收 ✓'; }
     }
-    fb(t,b);
-  }catch(e){fb(t,b)}
+  } catch(err) {}
+};
+
+evtSource.onerror = function() {
+  console.warn('SSE 连接断开，浏览器将自动重连');
+};
+
+// 关闭页面时断开 SSE
+window.addEventListener('beforeunload', function() { evtSource.close(); });
+
+// 复制功能
+function cp(t, b) {
+  if (!t) return;
+  var fallback = function() {
+    var a = document.createElement('textarea');
+    a.value = t; a.style.position = 'fixed'; a.style.opacity = '0';
+    document.body.appendChild(a); a.select();
+    try { document.execCommand('copy'); done(b); } catch(e) { toast('复制失败'); }
+    document.body.removeChild(a);
+  };
+  if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(function() { done(b); }).catch(fallback);
+  } else { fallback(); }
 }
-function fb(t,b){
-  var a=document.createElement('textarea');
-  a.value=t;a.style.position='fixed';a.style.opacity='0';
-  document.body.appendChild(a);a.select();
-  try{document.execCommand('copy');done(b)}catch(e){toast('复制失败')}
-  document.body.removeChild(a);
-}
-function done(b){
-  if(!b)return;
-  var o=b.textContent;
-  b.textContent='已复制 ✓';b.classList.add('ok');
-  setTimeout(function(){b.textContent=o;b.classList.remove('ok')},1500);
+function done(b) {
+  if (!b) return;
+  var o = b.textContent;
+  b.textContent = '已复制 ✓'; b.classList.add('ok');
+  setTimeout(function() { b.textContent = o; b.classList.remove('ok'); }, 1500);
   toast('已复制');
 }
-function cpCode(b){
-  if(codeValue){cp(codeValue,b)}else{toast('暂无验证码')}
+function cpCode(b) { if (codeValue) { cp(codeValue, b); } else { toast('暂无验证码'); } }
+
+var toastT = null;
+function toast(m, d) {
+  var t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = m || '';
+  t.classList.add('show');
+  if (toastT) clearTimeout(toastT);
+  toastT = setTimeout(function() { t.classList.remove('show'); }, d || 1500);
 }
 
-function checkCode(){
-  fetch(PREFIX+'/api/get_code/'+apiKey)
-    .then(function(r){return r.json()})
-    .then(function(d){
-      if(d.success&&d.code){
-        var el=document.getElementById('code-val');
-        var hint=document.getElementById('code-hint');
-        var st=document.getElementById('status');
-        // 有新验证码就更新显示
-        if(d.code!==codeValue){
-          codeValue=d.code;
-          el.textContent=d.code;
-          el.className='val';
-          document.getElementById('copy-code').style.display='';
-          hint.style.display='block';
-          hint.textContent='收到于: '+new Date(d.received_at).toLocaleString();
-          st.className='status done';
-          st.textContent='验证码已接收 ✓';
-        }
-      }
-    }).catch(function(){});
-}
-
-// 页面打开：启动监听 + 轮询
-startWatch();
-checkCode();
-polling=setInterval(checkCode,2000);
-
-// 刷新按钮：重新启动监听
-document.getElementById('refresh-btn').addEventListener('click',function(){
-  codeValue='';
-  document.getElementById('code-val').textContent='等待验证码...';
-  document.getElementById('code-val').className='val wait';
-  document.getElementById('copy-code').style.display='none';
-  document.getElementById('code-hint').style.display='none';
-  document.getElementById('status').className='status waiting';
-  document.getElementById('status').textContent='读取验证码中...';
-  watchStarted=false;
-  fetch(PREFIX+'/api/start_watch/'+apiKey+'?fresh=1&window_sec=120',{method:'POST'})
-    .then(function(){watchStarted=true;toast('已刷新');setTimeout(checkCode,500)})
-    .catch(function(){toast('刷新失败')});
-});
-
-// 页面关闭/隐藏=停止监听
-window.addEventListener('beforeunload',stopWatch);
-document.addEventListener('visibilitychange',function(){
-  if(document.hidden){
-    stopWatch();
-  }else{
-    // 重新打开页面=重新监听
-    startWatch();
-    if(!polling)polling=setInterval(checkCode,2000);
-    checkCode();
-  }
-});
-
-// 实时检测账号状态
+// 账号状态检测
 fetch(PREFIX+'/api/account_status/'+apiKey)
-  .then(function(r){return r.json()})
-  .then(function(d){
-    var tag=document.getElementById('status-tag');
-    if(!tag)return;
-    if(d.status==='banned'){
-      tag.textContent='账号已封禁';
-      tag.className='tag banned';
-    }else if(d.status==='unauthorized'){
-      tag.textContent='掉授权 联系客服';
-      tag.className='tag unauth';
-    }else{
-      tag.textContent='正常';
-      tag.className='tag ok';
-    }
-  }).catch(function(){
-    var tag=document.getElementById('status-tag');
-    if(tag){tag.textContent='正常';tag.className='tag ok';}
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    var tag = document.getElementById('status-tag');
+    if (!tag) return;
+    if (d.status === 'banned') { tag.textContent = '账号已封禁'; tag.className = 'tag banned'; }
+    else if (d.status === 'unauthorized') { tag.textContent = '授权失效'; tag.className = 'tag unauth'; }
+    else { tag.textContent = '正常'; tag.className = 'tag ok'; }
+  }).catch(function() {
+    var tag = document.getElementById('status-tag');
+    if (tag) { tag.textContent = '正常'; tag.className = 'tag ok'; }
   });
 </script>
 </body>
@@ -8789,6 +8711,69 @@ def _afc_start_web_server(self):
             "detail": detail,
             "phone": phone
         })
+
+    @self.flask_app.route('/api/stream/<api_key>')
+    def _sse_stream(api_key):
+        """SSE 实时推送验证码"""
+        import json as _json
+        import time as _time
+        account = self.get_account_by_api_key(api_key)
+        if not account:
+            return jsonify({"error": "无效的API密钥"}), 404
+
+        phone = account['phone']
+
+        # 确保监听已启动（回扫最近120秒历史消息）
+        try:
+            self.start_code_watch(api_key, timeout=1800, fresh=False, history_window_sec=120)
+        except Exception:
+            pass
+
+        def generate():
+            # 先推送当前已有的最新验证码（历史）
+            latest = self.get_latest_verification_code(phone)
+            last_sent_code = None
+            if latest and latest.get('code'):
+                last_sent_code = latest['code']
+                data = _json.dumps({
+                    'code': latest['code'],
+                    'time': latest.get('received_at', '')
+                })
+                yield 'data: %s\n\n' % data
+
+            # 持续轮询数据库，检测新验证码（每秒检查一次）
+            heartbeat_counter = 0
+            while True:
+                _time.sleep(1)
+                heartbeat_counter += 1
+
+                try:
+                    current = self.get_latest_verification_code(phone)
+                    if current and current.get('code') and current['code'] != last_sent_code:
+                        last_sent_code = current['code']
+                        data = _json.dumps({
+                            'code': current['code'],
+                            'time': current.get('received_at', '')
+                        })
+                        yield 'data: %s\n\n' % data
+                except Exception:
+                    pass
+
+                # 每25秒发送心跳，防止连接超时
+                if heartbeat_counter >= 25:
+                    heartbeat_counter = 0
+                    yield ': heartbeat\n\n'
+
+        from flask import Response, stream_with_context
+        return Response(
+            stream_with_context(generate()),
+            content_type='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Access-Control-Allow-Origin': '*'
+            }
+        )
 
     @self.flask_app.route('/healthz')
     def _healthz():
