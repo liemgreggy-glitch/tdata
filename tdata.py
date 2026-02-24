@@ -14414,6 +14414,7 @@ class EnhancedBot:
                 "waiting_cleanup_file",
                 "waiting_passkey_file",
                 "waiting_passkey_create_file",
+                "waiting_passkey_login_file",
                 "batch_create_upload",
                 "batch_create_names",
                 "batch_create_usernames",
