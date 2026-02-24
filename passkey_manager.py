@@ -8,9 +8,13 @@ Passkey（通行密钥）批量检测与删除管理器
 """
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
 import os
 import shutil
+import struct
 import tempfile
 import time
 import zipfile
@@ -25,6 +29,8 @@ AUTH_TIMEOUT = 20          # is_user_authorized 超时
 GET_ME_TIMEOUT = 20        # get_me 超时
 GET_PASSKEYS_TIMEOUT = 30  # GetPasskeys API 超时
 DELETE_PASSKEY_TIMEOUT = 20  # DeletePasskey API 超时
+INIT_PASSKEY_TIMEOUT = 30   # initPasskeyRegistration 超时
+REGISTER_PASSKEY_TIMEOUT = 30  # registerPasskey 超时
 DISCONNECT_TIMEOUT = 10    # 断开连接超时
 ACCOUNT_TOTAL_TIMEOUT = 120  # 单账号整体超时
 
@@ -181,6 +187,185 @@ def _make_delete_passkey_request(passkey_id: str):
 
 
 # ---------------------------------------------------------------------------
+# TL bytes helper
+# ---------------------------------------------------------------------------
+def _tl_bytes(data: bytes) -> bytes:
+    """Serialize bytes using TL (Telegram) wire format."""
+    from telethon.tl.tlobject import TLObject
+    return TLObject.serialize_bytes(data)
+
+
+def _tl_str(s: str) -> bytes:
+    """Serialize string using TL wire format."""
+    from telethon.tl.tlobject import TLObject
+    return TLObject.serialize_bytes(s.encode('utf-8'))
+
+
+def _b64url_encode(data: bytes) -> str:
+    """Base64url-encode bytes without padding."""
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+
+
+def _b64url_decode(s: str) -> bytes:
+    """Base64url-decode a string, tolerating missing padding."""
+    padded = s + '=' * (-len(s) % 4)
+    return base64.urlsafe_b64decode(padded)
+
+
+def _make_init_passkey_registration_request():
+    """构造 account.initPasskeyRegistration 请求（CONSTRUCTOR_ID = 0x429547e8）"""
+    if not TELETHON_AVAILABLE:
+        raise RuntimeError("Telethon 未安装")
+
+    from telethon.tl.tlobject import TLRequest as _TLRequest
+    from telethon.tl.alltlobjects import tlobjects
+
+    class _InitPasskeyRegistrationRequest(_TLRequest):
+        CONSTRUCTOR_ID = 0x429547e8
+        SUBCLASS_OF_ID = 0x429547e8
+
+        def __init__(self):
+            pass
+
+        def to_dict(self):
+            return {'_': 'account.initPasskeyRegistration'}
+
+        def _bytes(self):
+            return struct.pack('<I', self.CONSTRUCTOR_ID)
+
+        @staticmethod
+        def read_result(reader):
+            # account.PasskeyRegistrationOptions has unknown constructor id;
+            # read it manually: skip constructor id, then read json:DataJSON field
+            reader.read_int(signed=False)  # skip response constructor id
+            json_obj = reader.tgread_object()  # reads DataJSON#7d748d04
+            return json_obj
+
+    tlobjects[_InitPasskeyRegistrationRequest.CONSTRUCTOR_ID] = _InitPasskeyRegistrationRequest
+    return _InitPasskeyRegistrationRequest()
+
+
+def _make_input_passkey_credential_response(client_data_json: bytes,
+                                            attestation_object: bytes):
+    """构造 InputPasskeyCredentialResponse（CONSTRUCTOR_ID = 0xe3b72634）"""
+    if not TELETHON_AVAILABLE:
+        raise RuntimeError("Telethon 未安装")
+
+    from telethon.tl.tlobject import TLObject as _TLObject
+    from telethon.tl.alltlobjects import tlobjects
+
+    class _InputPasskeyCredentialResponse(_TLObject):
+        CONSTRUCTOR_ID = 0xe3b72634
+        SUBCLASS_OF_ID = 0xe3b72634
+
+        def __init__(self, client_data_json: bytes, attestation_object: bytes):
+            self.client_data_json = client_data_json
+            self.attestation_object = attestation_object
+
+        def to_dict(self):
+            return {
+                '_': 'inputPasskeyCredentialResponse',
+                'client_data_json': self.client_data_json,
+                'attestation_object': self.attestation_object,
+            }
+
+        def _bytes(self):
+            return (
+                struct.pack('<I', self.CONSTRUCTOR_ID)
+                + _tl_bytes(self.client_data_json)
+                + _tl_bytes(self.attestation_object)
+            )
+
+    tlobjects[_InputPasskeyCredentialResponse.CONSTRUCTOR_ID] = \
+        _InputPasskeyCredentialResponse
+    return _InputPasskeyCredentialResponse(
+        client_data_json=client_data_json,
+        attestation_object=attestation_object,
+    )
+
+
+def _make_input_passkey_credential(credential_id: str, credential_type: str,
+                                   raw_id: bytes, response):
+    """构造 InputPasskeyCredential（CONSTRUCTOR_ID = 0x1250a88a）"""
+    if not TELETHON_AVAILABLE:
+        raise RuntimeError("Telethon 未安装")
+
+    from telethon.tl.tlobject import TLObject as _TLObject
+    from telethon.tl.alltlobjects import tlobjects
+
+    class _InputPasskeyCredential(_TLObject):
+        CONSTRUCTOR_ID = 0x1250a88a
+        SUBCLASS_OF_ID = 0x1250a88a
+
+        def __init__(self, id: str, type: str, raw_id: bytes, response):
+            self.id = id
+            self.type = type
+            self.raw_id = raw_id
+            self.response = response
+
+        def to_dict(self):
+            return {
+                '_': 'inputPasskeyCredential',
+                'id': self.id,
+                'type': self.type,
+                'raw_id': self.raw_id,
+                'response': self.response.to_dict(),
+            }
+
+        def _bytes(self):
+            return (
+                struct.pack('<I', self.CONSTRUCTOR_ID)
+                + _tl_str(self.id)
+                + _tl_str(self.type)
+                + _tl_bytes(self.raw_id)
+                + bytes(self.response)
+            )
+
+    tlobjects[_InputPasskeyCredential.CONSTRUCTOR_ID] = _InputPasskeyCredential
+    return _InputPasskeyCredential(id=credential_id, type=credential_type,
+                                   raw_id=raw_id, response=response)
+
+
+def _make_register_passkey_request(credential):
+    """构造 account.registerPasskey 请求（CONSTRUCTOR_ID = 0x55b41fd6）"""
+    if not TELETHON_AVAILABLE:
+        raise RuntimeError("Telethon 未安装")
+
+    from telethon.tl.tlobject import TLRequest as _TLRequest
+    from telethon.tl.alltlobjects import tlobjects
+
+    class _RegisterPasskeyRequest(_TLRequest):
+        CONSTRUCTOR_ID = 0x55b41fd6
+        SUBCLASS_OF_ID = 0x55b41fd6
+
+        def __init__(self, credential):
+            self.credential = credential
+
+        def to_dict(self):
+            return {
+                '_': 'account.registerPasskey',
+                'credential': self.credential.to_dict(),
+            }
+
+        def _bytes(self):
+            return (
+                struct.pack('<I', self.CONSTRUCTOR_ID)
+                + bytes(self.credential)
+            )
+
+        @staticmethod
+        def read_result(reader):
+            # Response is Passkey type; try generic read, fall back gracefully
+            try:
+                return reader.tgread_object()
+            except Exception:
+                return None
+
+    tlobjects[_RegisterPasskeyRequest.CONSTRUCTOR_ID] = _RegisterPasskeyRequest
+    return _RegisterPasskeyRequest(credential=credential)
+
+
+# ---------------------------------------------------------------------------
 # 数据类
 # ---------------------------------------------------------------------------
 @dataclass
@@ -201,6 +386,18 @@ class PasskeyResult:
     deleted_count: int = 0
     delete_failed: List[str] = field(default_factory=list)
     status: str = "pending"   # pending / no_passkey / deleted / failed
+    error: Optional[str] = None
+    elapsed: float = 0.0
+
+
+@dataclass
+class PasskeyCreateResult:
+    account_name: str
+    phone: str = ""
+    file_type: str = "session"
+    status: str = "pending"   # pending / created / failed
+    passkey_id: str = ""
+    passkey_name: str = ""
     error: Optional[str] = None
     elapsed: float = 0.0
 
@@ -494,6 +691,488 @@ class PasskeyManager:
         except Exception as e:
             logger.warning(f"[Passkey] DeletePasskey 失败 id={passkey_id}: {e}")
             return False, str(e)
+
+    # ------------------------------------------------------------------
+    # 内部：初始化 Passkey 注册（获取 WebAuthn 注册选项）
+    # ------------------------------------------------------------------
+    async def _init_passkey_registration(self, client) -> dict:
+        """调用 account.initPasskeyRegistration，返回 WebAuthn 创建选项 dict"""
+        request = _make_init_passkey_registration_request()
+        logger.debug("[Passkey] initPasskeyRegistration 请求对象: %s",
+                     type(request).__name__)
+        response = await asyncio.wait_for(
+            client(request), timeout=INIT_PASSKEY_TIMEOUT
+        )
+        logger.debug("[Passkey] initPasskeyRegistration 响应类型: %s",
+                     type(response).__name__)
+        # response should be DataJSON with .data containing JSON string
+        if hasattr(response, 'data'):
+            raw = response.data
+        elif isinstance(response, str):
+            raw = response
+        else:
+            raw = str(response)
+        options = json.loads(raw)
+        logger.info("[Passkey] initPasskeyRegistration 成功，获得注册选项")
+        return options
+
+    # ------------------------------------------------------------------
+    # 内部：软件模拟 FIDO2 生成注册凭证
+    # ------------------------------------------------------------------
+    def _build_fido2_credential(self, options: dict,
+                                passkey_name: str = "Telegram") -> dict:
+        """
+        使用 cryptography 库软件模拟 FIDO2 设备，生成符合 WebAuthn 规范的注册凭证。
+
+        返回 dict 包含:
+            id            - base64url 编码的凭证 ID
+            rawId         - 原始凭证 ID bytes
+            clientDataJSON  - bytes
+            attestationObject - bytes
+        """
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.backends import default_backend
+            from fido2 import cbor
+        except ImportError as e:
+            raise RuntimeError(f"缺少依赖库: {e}")
+
+        # 解析 options 中的必要字段
+        challenge_raw = options.get('challenge', '')
+        # challenge 可能是 base64url 编码的字节串
+        if isinstance(challenge_raw, str):
+            challenge_bytes = _b64url_decode(challenge_raw)
+        else:
+            challenge_bytes = bytes(challenge_raw)
+
+        rp_info = options.get('rp', {})
+        rp_id = rp_info.get('id', 'telegram.org')
+        origin = f"https://{rp_id}"
+
+        # 1. 生成 EC P-256 密钥对
+        private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+        public_key = private_key.public_key()
+        pub_numbers = public_key.public_numbers()
+        x_bytes = pub_numbers.x.to_bytes(32, 'big')
+        y_bytes = pub_numbers.y.to_bytes(32, 'big')
+
+        # 2. 生成随机凭证 ID（32 字节）
+        credential_id = os.urandom(32)
+        cred_id_b64 = _b64url_encode(credential_id)
+
+        # 3. 构造 COSE EC2 公钥（ES256 = -7）
+        cose_key = {1: 2, 3: -7, -1: 1, -2: x_bytes, -3: y_bytes}
+        cose_key_bytes = cbor.encode(cose_key)
+
+        # 4. 构造 authData
+        rp_id_hash = hashlib.sha256(rp_id.encode()).digest()
+        flags = 0x45  # UP(bit0) | UV(bit2) | AT(bit6)
+        sign_count = struct.pack('>I', 0)
+        aaguid = bytes(16)
+        cred_id_len = struct.pack('>H', len(credential_id))
+        auth_data = (rp_id_hash + bytes([flags]) + sign_count
+                     + aaguid + cred_id_len + credential_id + cose_key_bytes)
+
+        # 5. 构造 clientDataJSON
+        client_data = {
+            "type": "webauthn.create",
+            "challenge": _b64url_encode(challenge_bytes),
+            "origin": origin,
+            "crossOrigin": False,
+        }
+        client_data_json = json.dumps(client_data, separators=(',', ':')).encode()
+
+        # 6. 构造 attestationObject（格式 "none"）
+        att_obj = {"fmt": "none", "authData": auth_data, "attStmt": {}}
+        attestation_object = cbor.encode(att_obj)
+
+        logger.info("[Passkey] FIDO2 凭证生成成功 id=%s", cred_id_b64[:16])
+        return {
+            'id': cred_id_b64,
+            'rawId': credential_id,
+            'clientDataJSON': client_data_json,
+            'attestationObject': attestation_object,
+        }
+
+    # ------------------------------------------------------------------
+    # 内部：提交 Passkey 注册凭证
+    # ------------------------------------------------------------------
+    async def _register_passkey(self, client,
+                                credential: dict) -> Tuple[bool, str, str]:
+        """
+        调用 account.registerPasskey，返回 (success, passkey_id, error)
+        """
+        try:
+            resp_obj = _make_input_passkey_credential_response(
+                client_data_json=credential['clientDataJSON'],
+                attestation_object=credential['attestationObject'],
+            )
+            cred_obj = _make_input_passkey_credential(
+                credential_id=credential['id'],
+                credential_type='public-key',
+                raw_id=credential['rawId'],
+                response=resp_obj,
+            )
+            request = _make_register_passkey_request(cred_obj)
+            response = await asyncio.wait_for(
+                client(request), timeout=REGISTER_PASSKEY_TIMEOUT
+            )
+            # Extract passkey ID from response
+            if response is not None:
+                pk_id = str(getattr(response, 'id', '') or credential['id'])
+            else:
+                pk_id = credential['id']
+            logger.info("[Passkey] registerPasskey 成功 id=%s", pk_id[:16])
+            return True, pk_id, ""
+        except asyncio.TimeoutError:
+            msg = f"registerPasskey 超时({REGISTER_PASSKEY_TIMEOUT}s)"
+            logger.error("[Passkey] %s", msg)
+            return False, "", msg
+        except Exception as e:
+            logger.warning("[Passkey] registerPasskey 失败: %s", e)
+            return False, "", str(e)
+
+    # ------------------------------------------------------------------
+    # 内部：为单账号创建 Passkey（init → build → register）
+    # ------------------------------------------------------------------
+    async def _create_passkey_for_account(
+        self, client, passkey_name: str = "Telegram"
+    ) -> Tuple[bool, str, str]:
+        """
+        组合三步完成 Passkey 创建，返回 (success, passkey_id, error)
+        """
+        # Step 1: 获取注册选项
+        try:
+            options = await self._init_passkey_registration(client)
+        except asyncio.TimeoutError:
+            msg = f"initPasskeyRegistration 超时({INIT_PASSKEY_TIMEOUT}s)"
+            logger.error("[Passkey] %s", msg)
+            return False, "", msg
+        except Exception as e:
+            logger.warning("[Passkey] initPasskeyRegistration 失败: %s", e)
+            return False, "", str(e)
+
+        # Step 2: 软件模拟生成 FIDO2 凭证
+        try:
+            credential = self._build_fido2_credential(options, passkey_name)
+        except Exception as e:
+            logger.error("[Passkey] 生成FIDO2凭证失败: %s", e, exc_info=True)
+            return False, "", f"生成凭证失败: {e}"
+
+        # Step 3: 提交注册
+        return await self._register_passkey(client, credential)
+
+    # ------------------------------------------------------------------
+    # 公共接口：批量创建 Passkey
+    # ------------------------------------------------------------------
+    async def batch_create_passkey(
+        self,
+        files: List[Tuple[str, str]],
+        file_type: str,
+        passkey_name: str = "Telegram",
+        progress_callback=None,
+        concurrent: int = DEFAULT_CONCURRENT,
+    ) -> Dict[str, List[PasskeyCreateResult]]:
+        """批量为多个账号创建 Passkey，返回分类结果字典"""
+        total = len(files)
+        logger.info("[Passkey] 批量创建开始: 共 %d 个账号, 类型=%s, 并发=%d",
+                    total, file_type, concurrent)
+        print(f"[Passkey] ▶ 批量创建开始: 共 {total} 个账号 | 类型={file_type} | 并发={concurrent}")
+
+        semaphore = asyncio.Semaphore(concurrent)
+        results: List[PasskeyCreateResult] = []
+        done_count = 0
+
+        async def _create_with_sem(file_path, file_name):
+            nonlocal done_count
+            async with semaphore:
+                result = await self._create_one(file_path, file_name,
+                                                file_type, passkey_name)
+                results.append(result)
+                done_count += 1
+                status_icon = {'created': '✅', 'failed': '❌'}.get(
+                    result.status, '?')
+                print(
+                    f"[Passkey] {status_icon} [{done_count}/{total}] "
+                    f"{file_name} => {result.status}"
+                    + (f" | 错误: {result.error}" if result.error else "")
+                    + (f" | PasskeyID: {result.passkey_id[:16]}"
+                       if result.passkey_id else "")
+                )
+                if progress_callback:
+                    try:
+                        await progress_callback(done_count, total, result)
+                    except Exception as cb_err:
+                        logger.warning("[Passkey] 进度回调异常: %s", cb_err)
+
+        tasks = [
+            asyncio.create_task(_create_with_sem(fp, fn))
+            for fp, fn in files
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        categorized: Dict[str, List[PasskeyCreateResult]] = {
+            'created': [],
+            'failed': [],
+        }
+        for r in results:
+            if r.status == 'created':
+                categorized['created'].append(r)
+            else:
+                categorized['failed'].append(r)
+
+        created = len(categorized['created'])
+        failed = len(categorized['failed'])
+        logger.info("[Passkey] 批量创建完成: 已创建=%d, 失败=%d", created, failed)
+        print(f"[Passkey] ■ 批量创建完成: ✅已创建={created} | ❌失败={failed}")
+        return categorized
+
+    async def _create_one(
+        self, file_path: str, file_name: str, file_type: str,
+        passkey_name: str
+    ) -> PasskeyCreateResult:
+        """处理单个账号的 Passkey 创建，带整体超时保护"""
+        start = time.time()
+        logger.info("[Passkey] 开始创建Passkey: %s (类型=%s)", file_name, file_type)
+        print(f"[Passkey] → 创建Passkey: {file_name}")
+
+        try:
+            result = await asyncio.wait_for(
+                self._create_one_inner(file_path, file_name, file_type,
+                                       passkey_name),
+                timeout=ACCOUNT_TOTAL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            elapsed = round(time.time() - start, 1)
+            logger.error("[Passkey] 账号 %s 整体超时 (%ds), 已用时 %ss",
+                         file_name, ACCOUNT_TOTAL_TIMEOUT, elapsed)
+            print(f"[Passkey] ⏱ 账号 {file_name} 整体超时 ({ACCOUNT_TOTAL_TIMEOUT}s)")
+            result = PasskeyCreateResult(
+                account_name=file_name, file_type=file_type,
+                passkey_name=passkey_name, status='failed',
+                error=f'处理超时({ACCOUNT_TOTAL_TIMEOUT}s)',
+            )
+        except Exception as e:
+            elapsed = round(time.time() - start, 1)
+            logger.error("[Passkey] 账号 %s 处理异常 (%ss): %s",
+                         file_name, elapsed, e, exc_info=True)
+            print(f"[Passkey] ✗ 账号 {file_name} 处理异常: {e}")
+            result = PasskeyCreateResult(
+                account_name=file_name, file_type=file_type,
+                passkey_name=passkey_name, status='failed', error=str(e),
+            )
+
+        result.elapsed = time.time() - start
+        return result
+
+    async def _create_one_inner(
+        self, file_path: str, file_name: str, file_type: str,
+        passkey_name: str
+    ) -> PasskeyCreateResult:
+        """实际创建逻辑（由 _create_one 包裹整体超时）"""
+        result = PasskeyCreateResult(account_name=file_name, file_type=file_type,
+                                     passkey_name=passkey_name)
+        start = time.time()
+        client = None
+        temp_session = None
+
+        try:
+            # 1. 连接
+            logger.info("[Passkey] %s: 建立连接...", file_name)
+            print(f"[Passkey]   {file_name}: 建立连接...")
+            client, temp_session = await self._connect(file_path, file_name,
+                                                       file_type)
+            if client is None:
+                result.status = 'failed'
+                result.error = '无法创建客户端连接'
+                return result
+            print(f"[Passkey]   {file_name}: ✓ 连接成功")
+
+            # 2. 检查授权
+            print(f"[Passkey]   {file_name}: 检查授权...")
+            try:
+                is_authorized = await asyncio.wait_for(
+                    client.is_user_authorized(), timeout=AUTH_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                result.status = 'failed'
+                result.error = f'授权检查超时({AUTH_TIMEOUT}s)'
+                return result
+
+            if not is_authorized:
+                result.status = 'failed'
+                result.error = '账号未授权'
+                return result
+            print(f"[Passkey]   {file_name}: ✓ 账号已授权")
+
+            # 3. 获取手机号（可选）
+            try:
+                me = await asyncio.wait_for(client.get_me(), timeout=GET_ME_TIMEOUT)
+                if me and hasattr(me, 'phone') and me.phone:
+                    result.phone = me.phone
+                    print(f"[Passkey]   {file_name}: 手机号={result.phone}")
+            except Exception:
+                pass
+
+            # 4. 创建 Passkey
+            logger.info("[Passkey] %s: 开始创建Passkey...", file_name)
+            print(f"[Passkey]   {file_name}: 创建Passkey...")
+            success, pk_id, error = await self._create_passkey_for_account(
+                client, passkey_name
+            )
+            if success:
+                result.status = 'created'
+                result.passkey_id = pk_id
+                logger.info("[Passkey] %s: Passkey 创建成功 id=%s",
+                            file_name, pk_id[:16] if pk_id else '')
+                print(f"[Passkey]   {file_name}: ✓ Passkey 创建成功")
+            else:
+                result.status = 'failed'
+                result.error = error
+                logger.warning("[Passkey] %s: Passkey 创建失败: %s",
+                               file_name, error)
+                print(f"[Passkey]   {file_name}: ✗ Passkey 创建失败: {error}")
+
+        except Exception as e:
+            result.status = 'failed'
+            result.error = str(e)
+            logger.error("[Passkey] %s: 处理异常: %s", file_name, e, exc_info=True)
+            print(f"[Passkey]   {file_name}: ✗ 异常: {e}")
+
+        finally:
+            if client:
+                try:
+                    await asyncio.wait_for(client.disconnect(),
+                                           timeout=DISCONNECT_TIMEOUT)
+                except Exception:
+                    pass
+            if temp_session and os.path.exists(temp_session):
+                try:
+                    os.remove(temp_session)
+                except Exception:
+                    pass
+
+        result.elapsed = time.time() - start
+        return result
+
+    # ------------------------------------------------------------------
+    # 结果文件打包（创建 Passkey 专用）
+    # ------------------------------------------------------------------
+    def create_result_files_for_create(
+        self,
+        results: Dict[str, List[PasskeyCreateResult]],
+        files: List[Tuple[str, str]],
+        task_id: str,
+        file_type: str,
+        user_id: int = None,
+    ) -> List[Tuple[str, str, str, int]]:
+        """
+        将创建 Passkey 的结果打包为 ZIP 文件。
+
+        成功创建的账号：每个账号生成一个 {手机号}.passkey 文件（JSON 格式），
+        所有 .passkey 文件统一打包到 passkey.zip。
+        失败账号：单独打包到 失败_{n}个_{task_id}.zip。
+
+        返回: [(zip_path, filename, caption, size_bytes), ...]
+        """
+        logger.info("[Passkey] 开始打包创建结果文件 task_id=%s", task_id)
+        print("[Passkey] 📦 打包创建结果文件...")
+        output = []
+        base_dir = tempfile.mkdtemp(prefix=f"passkey_create_{task_id}_")
+
+        # ── 成功：生成 {phone}.passkey 文件并打包到 passkey.zip ──────────
+        created_results = results.get('created', [])
+        if created_results:
+            zip_name = "passkey.zip"
+            zip_path = os.path.join(base_dir, zip_name)
+            count = len(created_results)
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for r in created_results:
+                    # 文件名：手机号优先，回退到账号名（去扩展名）
+                    phone = r.phone.strip() if r.phone else ""
+                    file_stem = phone if phone else os.path.splitext(r.account_name)[0]
+                    passkey_filename = f"{file_stem}.passkey"
+
+                    passkey_data = {
+                        "phone": r.phone,
+                        "account": r.account_name,
+                        "passkey_id": r.passkey_id,
+                        "passkey_name": r.passkey_name,
+                        "created_at": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    }
+                    zf.writestr(
+                        passkey_filename,
+                        json.dumps(passkey_data, ensure_ascii=False, indent=2).encode('utf-8'),
+                    )
+
+            size = os.path.getsize(zip_path)
+            caption = f"✅ 已创建Passkey：{count} 个"
+            logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
+            print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
+            output.append((zip_path, zip_name, caption, size))
+
+        # ── 失败：单独打包 ────────────────────────────────────────────────
+        failed_results = results.get('failed', [])
+        if failed_results:
+            count = len(failed_results)
+            zip_name = f"失败_{count}个_{task_id}.zip"
+            zip_path = os.path.join(base_dir, zip_name)
+
+            report_lines = [
+                "Passkey 创建失败报告",
+                f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"账号数量: {count}",
+                "",
+            ]
+            for r in failed_results:
+                report_lines.append(f"账号: {r.account_name}")
+                if r.phone:
+                    report_lines.append(f"  手机号: {r.phone}")
+                report_lines.append(f"  错误: {r.error or '未知错误'}")
+                report_lines.append("")
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(
+                    "passkey_create_report.txt",
+                    "\n".join(report_lines).encode('utf-8'),
+                )
+                # 写入账号原始文件
+                for r in failed_results:
+                    orig_path = None
+                    for fp, fn in files:
+                        base_fn = os.path.splitext(fn)[0]
+                        base_acc = os.path.splitext(r.account_name)[0]
+                        if (fn == r.account_name
+                                or os.path.basename(fp) == r.account_name
+                                or base_fn == base_acc):
+                            orig_path = fp
+                            break
+
+                    if orig_path and os.path.exists(orig_path):
+                        arc_name = os.path.basename(orig_path)
+                        if os.path.isdir(orig_path):
+                            for root, dirs, fnames in os.walk(orig_path):
+                                for fname in fnames:
+                                    full = os.path.join(root, fname)
+                                    rel = os.path.relpath(
+                                        full, os.path.dirname(orig_path))
+                                    zf.write(full, rel)
+                        else:
+                            zf.write(orig_path, arc_name)
+                            json_path = orig_path.replace('.session', '.json')
+                            if os.path.exists(json_path):
+                                zf.write(json_path, os.path.basename(json_path))
+
+            size = os.path.getsize(zip_path)
+            caption = f"❌ 处理失败：{count} 个"
+            logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
+            print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
+            output.append((zip_path, zip_name, caption, size))
+
+        logger.info("[Passkey] 打包完成，共 %d 个ZIP文件", len(output))
+        print(f"[Passkey] 📦 打包完成，共 {len(output)} 个ZIP文件")
+        return output
 
     # ------------------------------------------------------------------
     # 内部：创建客户端连接
