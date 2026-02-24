@@ -11504,7 +11504,7 @@ class EnhancedBot:
         只移除文件系统不允许的字符，保留所有Unicode字符包括Emoji。
         
         移除的字符（Windows和Unix文件系统不允许）:
-        - 反斜杠 (\\)、正斜杠 (/)、冒号 (:)
+        - 反斜杠 (\)、正斜杠 (/)、冒号 (:)
         - 星号 (*)、问号 (?)、引号 (")
         - 小于号 (<)、大于号 (>)、竖线 (|)
         
@@ -14414,7 +14414,6 @@ class EnhancedBot:
                 "waiting_cleanup_file",
                 "waiting_passkey_file",
                 "waiting_passkey_create_file",
-                "waiting_passkey_login_file",
                 "batch_create_upload",
                 "batch_create_names",
                 "batch_create_usernames",
@@ -29303,9 +29302,7 @@ o5eth</code>
         task_id = f"{user_id}_{int(start_time)}"
 
         progress_msg = self.safe_send_message(
-            update,
-            f"📥 <b>{t(user_id, 'passkey_login_processing')}...</b>",
-            parse_mode='HTML'
+            update, f"📥 <b>{t(user_id, 'passkey_login_processing')}...</b>", 'HTML'
         )
         if not progress_msg:
             return
@@ -29315,8 +29312,7 @@ o5eth</code>
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_passkey_login_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            tg_file = await context.bot.get_file(document.file_id)
-            await tg_file.download_to_drive(temp_zip)
+            document.get_file().download(temp_zip)
 
             # 解压并查找所有 .passkey 文件
             extract_dir = os.path.join(temp_dir, "extracted")
@@ -29334,7 +29330,7 @@ o5eth</code>
 
             if not passkey_files:
                 try:
-                    await progress_msg.edit_text(
+                    progress_msg.edit_text(
                         f"❌ <b>{t(user_id, 'passkey_login_no_files')}</b>",
                         parse_mode='HTML'
                     )
@@ -29351,7 +29347,7 @@ o5eth</code>
                     self._passkey_manager = PasskeyManager(self.proxy_manager, self.db)
                 except Exception as e:
                     try:
-                        await progress_msg.edit_text(
+                        progress_msg.edit_text(
                             f"❌ <b>PasskeyManager 初始化失败</b>\n\n{str(e)}",
                             parse_mode='HTML'
                         )
@@ -29386,7 +29382,7 @@ o5eth</code>
                 if now - last_update_time >= UPDATE_INTERVAL or done == total:
                     last_update_time = now
                     try:
-                        await progress_msg.edit_text(
+                        progress_msg.edit_text(
                             make_progress_text(done, total, stats),
                             parse_mode='HTML'
                         )
@@ -29394,7 +29390,7 @@ o5eth</code>
                         pass
 
             try:
-                await progress_msg.edit_text(
+                progress_msg.edit_text(
                     make_progress_text(0, total, stats),
                     parse_mode='HTML'
                 )
@@ -29417,7 +29413,7 @@ o5eth</code>
                 f"{t(user_id, 'passkey_login_packing')}"
             )
             try:
-                await progress_msg.edit_text(summary, parse_mode='HTML')
+                progress_msg.edit_text(summary, parse_mode='HTML')
             except Exception:
                 pass
 
@@ -29429,7 +29425,7 @@ o5eth</code>
                 for zip_path, zip_name, caption, size in result_files:
                     try:
                         with open(zip_path, 'rb') as f:
-                            await context.bot.send_document(
+                            context.bot.send_document(
                                 chat_id=update.effective_chat.id,
                                 document=f,
                                 filename=zip_name,
@@ -29444,7 +29440,7 @@ o5eth</code>
             import traceback
             traceback.print_exc()
             try:
-                await progress_msg.edit_text(
+                progress_msg.edit_text(
                     f"❌ <b>处理失败</b>\n\n错误: {str(e)}",
                     parse_mode='HTML'
                 )
@@ -29472,8 +29468,7 @@ o5eth</code>
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_passkey_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            tg_file = await context.bot.get_file(document.file_id)
-            await tg_file.download_to_drive(temp_zip)
+            document.get_file().download(temp_zip)
 
             files, extract_dir, file_type = self.processor.scan_zip_file(
                 temp_zip, user_id, task_id
