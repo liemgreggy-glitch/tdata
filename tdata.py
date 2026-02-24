@@ -8667,16 +8667,15 @@ def _afc_start_web_server(self):
                         auth = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
                         if not auth:
                             return 'unauthorized', '账号已掉授权'
-                        # 授权成功后检查冻结状态：读取 777000 最近消息
+                        # 授权后主动调用 API 检测冻结状态。
+                        # 冻结账号不会向 777000 发送消息，而是以弹窗形式展示；
+                        # 所有 API 调用（包括 get_dialogs）都会返回 ACCOUNT_FROZEN 错误。
                         try:
-                            frozen_keywords = ['your account is frozen', 'account has been frozen', 'account is frozen', 'frozen']
-                            msgs = await asyncio.wait_for(client.get_messages(777000, limit=5), timeout=10)
-                            for msg in msgs:
-                                text = (getattr(msg, 'raw_text', '') or getattr(msg, 'message', '') or '').lower()
-                                if any(kw in text for kw in frozen_keywords):
-                                    return 'frozen', '账号已冻结'
-                        except Exception:
-                            pass
+                            await asyncio.wait_for(client.get_dialogs(limit=1), timeout=10)
+                        except Exception as e:
+                            if 'FROZEN' in str(e).upper():
+                                return 'frozen', '账号已冻结'
+                            raise
                         return 'active', '账号正常'
                     except AuthKeyDuplicatedError:
                         return 'multi', '多设备冲突，授权Key重复'
