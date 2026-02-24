@@ -2985,6 +2985,7 @@ TEXTS = {
     'passkey_submenu_desc': 'Выберите действие:',
     'passkey_btn_detect_delete': '🗑️ Обнаружить и удалить Passkey',
     'passkey_btn_create': '➕ Создать Passkey',
+    'passkey_btn_login': '🔑 Вход через Passkey',
     # Создание Passkey
     'passkey_create_title': '➕ Создание Passkey',
     'passkey_create_desc1': '· Программная эмуляция FIDO2 — физическое устройство не нужно',
@@ -3007,4 +3008,16 @@ TEXTS = {
     'passkey_create_elapsed': '⏱️ Время: {seconds} сек',
     'passkey_create_packing': '📦 Упаковка результатов...',
     'passkey_create_send_failed': '⚠️ Не удалось отправить файлы создания',
+    # Вход через Passkey
+    'passkey_login_title': '🔑 Вход через Passkey → Экспорт сессии',
+    'passkey_login_upload_prompt': '📤 Загрузите ZIP с файлами .passkey',
+    'passkey_login_desc1': '· Пакетная обработка: ZIP может содержать несколько .passkey',
+    'passkey_login_desc2': '· При успехе возвращает session.json',
+    'passkey_login_desc3': '· Файл .passkey должен содержать поле private_key_pem',
+    'passkey_login_processing': '🔑 Вход через Passkey...',
+    'passkey_login_stat_success': '✅ Успешно: {count}',
+    'passkey_login_stat_failed': '❌ Ошибок: {count}',
+    'passkey_login_complete': '🎉 Вход через Passkey завершён!',
+    'passkey_login_no_files': '❌ Файлы .passkey не найдены в ZIP',
+    'passkey_login_packing': '📦 Упаковка файлов сессий...',
 }

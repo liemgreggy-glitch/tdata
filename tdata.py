@@ -12848,6 +12848,8 @@ class EnhancedBot:
             self.handle_passkey_detect_start(query)
         elif data == "passkey_create_start":
             self.handle_passkey_create_start(query)
+        elif data == "passkey_login_start":
+            self.handle_passkey_login_start(query)
         elif data == "passkey_execute":
             self.handle_passkey_execute(update, context, query)
         elif data == "passkey_create_execute":
@@ -14613,6 +14615,21 @@ class EnhancedBot:
                     import traceback
                     traceback.print_exc()
             threading.Thread(target=process_passkey_create, daemon=True).start()
+        elif user_status == "waiting_passkey_login_file":
+            # Passkey 登录处理
+            def process_passkey_login():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.process_passkey_login_upload(update, context, document))
+                    loop.close()
+                except asyncio.CancelledError:
+                    print(f"[process_passkey_login] 任务被取消")
+                except Exception as e:
+                    print(f"[process_passkey_login] 处理异常: {e}")
+                    import traceback
+                    traceback.print_exc()
+            threading.Thread(target=process_passkey_login, daemon=True).start()
         elif user_status == "batch_create_upload":
             # 批量创建文件处理
             def process_batch_create():
@@ -29149,13 +29166,19 @@ o5eth</code>
             f"  · {t(user_id, 'passkey_feature2')[2:]}\n\n"
             f"➕ <b>{t(user_id, 'passkey_btn_create')}</b>\n"
             f"  · {t(user_id, 'passkey_create_desc1')[2:]}\n"
-            f"  · {t(user_id, 'passkey_create_desc2')[2:]}"
+            f"  · {t(user_id, 'passkey_create_desc2')[2:]}\n\n"
+            f"🔑 <b>{t(user_id, 'passkey_btn_login')}</b>\n"
+            f"  · {t(user_id, 'passkey_login_desc1')[2:]}\n"
+            f"  · {t(user_id, 'passkey_login_desc2')[2:]}"
         )
 
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(t(user_id, 'passkey_btn_detect_delete'), callback_data="passkey_detect_start"),
                 InlineKeyboardButton(t(user_id, 'passkey_btn_create'), callback_data="passkey_create_start"),
+            ],
+            [
+                InlineKeyboardButton(t(user_id, 'passkey_btn_login'), callback_data="passkey_login_start"),
             ],
             [InlineKeyboardButton(f"🔙 {t(user_id, 'btn_back_to_menu')}", callback_data="back_to_main")],
         ])
@@ -29236,6 +29259,196 @@ o5eth</code>
             query.from_user.first_name or "",
             "waiting_passkey_create_file"
         )
+
+    def handle_passkey_login_start(self, query):
+        """显示 Passkey 登录说明，提示上传包含 .passkey 文件的 ZIP"""
+        query.answer()
+        user_id = query.from_user.id
+
+        # 检查会员权限
+        is_member, _, _ = self.db.check_membership(user_id)
+        if not is_member and not self.db.is_admin(user_id):
+            self.safe_edit_message(query, "❌ 需要会员权限才能使用 Passkey 管理功能")
+            return
+
+        text = f"""
+<b>{t(user_id, 'passkey_login_title')}</b>
+
+{t(user_id, 'passkey_login_desc1')}
+{t(user_id, 'passkey_login_desc2')}
+{t(user_id, 'passkey_login_desc3')}
+
+<b>{t(user_id, 'passkey_login_upload_prompt')}</b>
+        """
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🔙 {t(user_id, 'btn_back_to_menu')}", callback_data="passkey_manage")]
+        ])
+
+        self.safe_edit_message(query, text, 'HTML', keyboard)
+
+        # 设置用户状态 - 等待上传 passkey 登录文件
+        self.db.save_user(
+            user_id,
+            query.from_user.username or "",
+            query.from_user.first_name or "",
+            "waiting_passkey_login_file"
+        )
+
+    async def process_passkey_login_upload(self, update, context, document):
+        """处理用户上传的 Passkey 登录 ZIP 文件，执行批量登录"""
+        user_id = update.effective_user.id
+        start_time = time.time()
+        task_id = f"{user_id}_{int(start_time)}"
+
+        progress_msg = self.safe_send_message(
+            update, f"📥 <b>{t(user_id, 'passkey_login_processing')}...</b>", 'HTML'
+        )
+        if not progress_msg:
+            return
+
+        temp_dir = None
+
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="temp_passkey_login_")
+            temp_zip = os.path.join(temp_dir, document.file_name)
+            document.get_file().download(temp_zip)
+
+            # 解压并查找所有 .passkey 文件
+            extract_dir = os.path.join(temp_dir, "extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            with zipfile.ZipFile(temp_zip, 'r') as zf:
+                zf.extractall(extract_dir)
+
+            passkey_files = []
+            for root, dirs, fnames in os.walk(extract_dir):
+                for fname in fnames:
+                    if fname.endswith('.passkey'):
+                        passkey_files.append(
+                            (os.path.join(root, fname), fname)
+                        )
+
+            if not passkey_files:
+                try:
+                    progress_msg.edit_text(
+                        f"❌ <b>{t(user_id, 'passkey_login_no_files')}</b>",
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
+                return
+
+            total = len(passkey_files)
+
+            # 懒初始化 PasskeyManager
+            if self._passkey_manager is None:
+                try:
+                    from passkey_manager import PasskeyManager
+                    self._passkey_manager = PasskeyManager(self.proxy_manager, self.db)
+                except Exception as e:
+                    try:
+                        progress_msg.edit_text(
+                            f"❌ <b>PasskeyManager 初始化失败</b>\n\n{str(e)}",
+                            parse_mode='HTML'
+                        )
+                    except Exception:
+                        pass
+                    return
+
+            import time as _time
+
+            stats = {'success': 0, 'failed': 0}
+            last_update_time = _time.time()
+            UPDATE_INTERVAL = 5
+
+            def make_progress_text(done, total, stats):
+                pct = int(done / total * 100) if total else 0
+                filled = int(pct / 5)
+                bar = '█' * filled + '░' * (20 - filled)
+                return (
+                    f"<b>{t(user_id, 'passkey_login_processing')}</b>\n\n"
+                    f"{t(user_id, 'passkey_progress_bar').format(bar=bar, pct=pct)} ({done}/{total})\n\n"
+                    f"{t(user_id, 'passkey_login_stat_success').format(count=stats['success'])}\n"
+                    f"{t(user_id, 'passkey_login_stat_failed').format(count=stats['failed'])}"
+                )
+
+            async def on_progress(done, total, result):
+                nonlocal last_update_time
+                if result.status == 'success':
+                    stats['success'] += 1
+                else:
+                    stats['failed'] += 1
+                now = _time.time()
+                if now - last_update_time >= UPDATE_INTERVAL or done == total:
+                    last_update_time = now
+                    try:
+                        progress_msg.edit_text(
+                            make_progress_text(done, total, stats),
+                            parse_mode='HTML'
+                        )
+                    except Exception:
+                        pass
+
+            try:
+                progress_msg.edit_text(
+                    make_progress_text(0, total, stats),
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+
+            start = _time.time()
+            results = await self._passkey_manager.batch_login_from_passkeys(
+                passkey_files, progress_callback=on_progress
+            )
+            elapsed = _time.time() - start
+
+            success_count = len(results.get('success', []))
+            failed_count = len(results.get('failed', []))
+
+            summary = (
+                f"{t(user_id, 'passkey_login_complete')}\n\n"
+                f"{t(user_id, 'passkey_login_stat_success').format(count=success_count)}\n"
+                f"{t(user_id, 'passkey_login_stat_failed').format(count=failed_count)}\n\n"
+                f"{t(user_id, 'passkey_login_packing')}"
+            )
+            try:
+                progress_msg.edit_text(summary, parse_mode='HTML')
+            except Exception:
+                pass
+
+            # 打包并发送结果文件
+            try:
+                result_files = self._passkey_manager.create_result_files_for_login(
+                    results, task_id
+                )
+                for zip_path, zip_name, caption, size in result_files:
+                    try:
+                        with open(zip_path, 'rb') as f:
+                            context.bot.send_document(
+                                chat_id=update.effective_chat.id,
+                                document=f,
+                                filename=zip_name,
+                                caption=caption,
+                            )
+                    except Exception as send_err:
+                        print(f"[passkey_login] 发送结果文件失败: {send_err}")
+            except Exception as e:
+                print(f"[passkey_login] 打包结果文件失败: {e}")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                progress_msg.edit_text(
+                    f"❌ <b>处理失败</b>\n\n错误: {str(e)}",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+        finally:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def process_passkey_upload(self, update, context, document):
         """处理用户上传的 Passkey ZIP 文件，扫描并显示确认按钮"""
