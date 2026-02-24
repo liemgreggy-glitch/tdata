@@ -245,123 +245,117 @@ def _make_init_passkey_registration_request():
     return _InitPasskeyRegistrationRequest()
 
 
-def _make_input_passkey_credential_response(client_data_json: bytes,
-                                            attestation_object: bytes):
-    """构造 InputPasskeyCredentialResponse（CONSTRUCTOR_ID = 0xe3b72634）"""
+# ---------------------------------------------------------------------------
+# 模块级 TL 类定义（只定义一次，避免 tlobjects 冲突）
+# 真实 schema (tdesktop api.tl):
+#   inputPasskeyResponseRegister#3e63935c client_data:DataJSON attestation_data:bytes = InputPasskeyResponse
+#   inputPasskeyCredentialPublicKey#3c27b78f id:string raw_id:string response:InputPasskeyResponse = InputPasskeyCredential
+#   account.registerPasskey#55b41fd6 credential:InputPasskeyCredential = Passkey
+# ---------------------------------------------------------------------------
+def _register_tl_classes():
+    """在模块加载时注册所有自定义 TL 类，只执行一次。"""
     if not TELETHON_AVAILABLE:
-        raise RuntimeError("Telethon 未安装")
-
-    from telethon.tl.tlobject import TLObject as _TLObject
+        return
+    from telethon.tl.tlobject import TLObject as _TLO, TLRequest as _TLR
     from telethon.tl.alltlobjects import tlobjects
+    global _InputPasskeyCredentialResponse, _InputPasskeyCredential, _RegisterPasskeyRequest
 
-    class _InputPasskeyCredentialResponse(_TLObject):
-        CONSTRUCTOR_ID = 0xe3b72634
-        SUBCLASS_OF_ID = 0xe3b72634
-
-        def __init__(self, client_data_json: bytes, attestation_object: bytes):
+    # inputPasskeyResponseRegister#3e63935c
+    # client_data:DataJSON  attestation_data:bytes
+    # DataJSON = dataJSON data:string  (constructor 0x7d748d04)
+    class _IPCR(_TLO):
+        CONSTRUCTOR_ID = 0x3e63935c
+        SUBCLASS_OF_ID = 0x3e63935c
+        def __init__(self, client_data_json: bytes, attestation_data: bytes):
             self.client_data_json = client_data_json
-            self.attestation_object = attestation_object
-
+            self.attestation_data = attestation_data
         def to_dict(self):
-            return {
-                '_': 'inputPasskeyCredentialResponse',
-                'client_data_json': self.client_data_json,
-                'attestation_object': self.attestation_object,
-            }
-
+            return {'_': 'inputPasskeyResponseRegister',
+                    'client_data': self.client_data_json.decode(),
+                    'attestation_data': self.attestation_data}
         def _bytes(self):
-            return (
-                struct.pack('<I', self.CONSTRUCTOR_ID)
-                + _tl_bytes(self.client_data_json)
-                + _tl_bytes(self.attestation_object)
+            # DataJSON#7d748d04 data:string
+            data_json_bytes = (
+                struct.pack('<I', 0x7d748d04)
+                + _tl_str(self.client_data_json.decode())
             )
+            return (struct.pack('<I', self.CONSTRUCTOR_ID)
+                    + data_json_bytes
+                    + _tl_bytes(self.attestation_data))
 
-    tlobjects[_InputPasskeyCredentialResponse.CONSTRUCTOR_ID] = \
-        _InputPasskeyCredentialResponse
-    return _InputPasskeyCredentialResponse(
-        client_data_json=client_data_json,
-        attestation_object=attestation_object,
-    )
-
-
-def _make_input_passkey_credential(credential_id: str, credential_type: str,
-                                   raw_id: bytes, response):
-    """构造 InputPasskeyCredential（CONSTRUCTOR_ID = 0x1250a88a）"""
-    if not TELETHON_AVAILABLE:
-        raise RuntimeError("Telethon 未安装")
-
-    from telethon.tl.tlobject import TLObject as _TLObject
-    from telethon.tl.alltlobjects import tlobjects
-
-    class _InputPasskeyCredential(_TLObject):
-        CONSTRUCTOR_ID = 0x1250a88a
-        SUBCLASS_OF_ID = 0x1250a88a
-
-        def __init__(self, id: str, type: str, raw_id: bytes, response):
+    # inputPasskeyCredentialPublicKey#3c27b78f
+    # id:string  raw_id:string  response:InputPasskeyResponse
+    class _IPC(_TLO):
+        CONSTRUCTOR_ID = 0x3c27b78f
+        SUBCLASS_OF_ID = 0x3c27b78f
+        def __init__(self, id: str, raw_id: str, response):
             self.id = id
-            self.type = type
             self.raw_id = raw_id
             self.response = response
-
         def to_dict(self):
-            return {
-                '_': 'inputPasskeyCredential',
-                'id': self.id,
-                'type': self.type,
-                'raw_id': self.raw_id,
-                'response': self.response.to_dict(),
-            }
-
+            return {'_': 'inputPasskeyCredentialPublicKey',
+                    'id': self.id,
+                    'raw_id': self.raw_id,
+                    'response': self.response.to_dict()}
         def _bytes(self):
-            return (
-                struct.pack('<I', self.CONSTRUCTOR_ID)
-                + _tl_str(self.id)
-                + _tl_str(self.type)
-                + _tl_bytes(self.raw_id)
-                + bytes(self.response)
-            )
+            return (struct.pack('<I', self.CONSTRUCTOR_ID)
+                    + _tl_str(self.id)
+                    + _tl_str(self.raw_id)
+                    + bytes(self.response))
 
-    tlobjects[_InputPasskeyCredential.CONSTRUCTOR_ID] = _InputPasskeyCredential
-    return _InputPasskeyCredential(id=credential_id, type=credential_type,
-                                   raw_id=raw_id, response=response)
-
-
-def _make_register_passkey_request(credential):
-    """构造 account.registerPasskey 请求（CONSTRUCTOR_ID = 0x55b41fd6）"""
-    if not TELETHON_AVAILABLE:
-        raise RuntimeError("Telethon 未安装")
-
-    from telethon.tl.tlobject import TLRequest as _TLRequest
-    from telethon.tl.alltlobjects import tlobjects
-
-    class _RegisterPasskeyRequest(_TLRequest):
+    # account.registerPasskey#55b41fd6
+    class _RPR(_TLR):
         CONSTRUCTOR_ID = 0x55b41fd6
         SUBCLASS_OF_ID = 0x55b41fd6
-
         def __init__(self, credential):
             self.credential = credential
-
         def to_dict(self):
-            return {
-                '_': 'account.registerPasskey',
-                'credential': self.credential.to_dict(),
-            }
-
+            return {'_': 'account.registerPasskey',
+                    'credential': self.credential.to_dict()}
         def _bytes(self):
-            return (
-                struct.pack('<I', self.CONSTRUCTOR_ID)
-                + bytes(self.credential)
-            )
-
+            return (struct.pack('<I', self.CONSTRUCTOR_ID)
+                    + bytes(self.credential))
         @staticmethod
         def read_result(reader):
-            # Response is Passkey type; try generic read, fall back gracefully
             try:
                 return reader.tgread_object()
             except Exception:
                 return None
 
-    tlobjects[_RegisterPasskeyRequest.CONSTRUCTOR_ID] = _RegisterPasskeyRequest
+    tlobjects[_IPCR.CONSTRUCTOR_ID] = _IPCR
+    tlobjects[_IPC.CONSTRUCTOR_ID]  = _IPC
+    tlobjects[_RPR.CONSTRUCTOR_ID]  = _RPR
+
+    _InputPasskeyCredentialResponse = _IPCR
+    _InputPasskeyCredential         = _IPC
+    _RegisterPasskeyRequest         = _RPR
+
+# 占位（会被 _register_tl_classes 覆盖）
+_InputPasskeyCredentialResponse = None
+_InputPasskeyCredential         = None
+_RegisterPasskeyRequest         = None
+_register_tl_classes()
+
+def _make_input_passkey_credential_response(client_data_json: bytes,
+                                            attestation_data: bytes):
+    # inputPasskeyResponseRegister: client_data:DataJSON attestation_data:bytes
+    return _InputPasskeyCredentialResponse(
+        client_data_json=client_data_json,
+        attestation_data=attestation_data,
+    )
+
+
+def _make_input_passkey_credential(credential_id: str, raw_id_b64: str,
+                                   response):
+    # inputPasskeyCredentialPublicKey: id:string raw_id:string response:InputPasskeyResponse
+    return _InputPasskeyCredential(
+        id=credential_id,
+        raw_id=raw_id_b64,
+        response=response,
+    )
+
+
+def _make_register_passkey_request(credential):
     return _RegisterPasskeyRequest(credential=credential)
 
 
@@ -398,6 +392,7 @@ class PasskeyCreateResult:
     status: str = "pending"   # pending / created / failed
     passkey_id: str = ""
     passkey_name: str = ""
+    private_key_pem: str = ""  # EC P-256 私钥 PEM，登录时签名用
     error: Optional[str] = None
     elapsed: float = 0.0
 
@@ -714,6 +709,7 @@ class PasskeyManager:
             raw = str(response)
         options = json.loads(raw)
         logger.info("[Passkey] initPasskeyRegistration 成功，获得注册选项")
+        print("[DEBUG] initPasskeyRegistration options:", json.dumps(options, default=str))
         return options
 
     # ------------------------------------------------------------------
@@ -737,6 +733,8 @@ class PasskeyManager:
         except ImportError as e:
             raise RuntimeError(f"缺少依赖库: {e}")
 
+        # 解包 publicKey 层（Telegram 返回的 options 有一层 publicKey 包装）
+        options = options.get("publicKey", options)
         # 解析 options 中的必要字段
         challenge_raw = options.get('challenge', '')
         # challenge 可能是 base64url 编码的字节串
@@ -747,7 +745,7 @@ class PasskeyManager:
 
         rp_info = options.get('rp', {})
         rp_id = rp_info.get('id', 'telegram.org')
-        origin = f"https://{rp_id}"
+        origin = "https://web.telegram.org"
 
         # 1. 生成 EC P-256 密钥对
         private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
@@ -776,22 +774,36 @@ class PasskeyManager:
         # 5. 构造 clientDataJSON
         client_data = {
             "type": "webauthn.create",
-            "challenge": _b64url_encode(challenge_bytes),
+            "challenge": challenge_raw if isinstance(challenge_raw, str) else _b64url_encode(challenge_bytes),
             "origin": origin,
             "crossOrigin": False,
         }
         client_data_json = json.dumps(client_data, separators=(',', ':')).encode()
 
-        # 6. 构造 attestationObject（格式 "none"）
-        att_obj = {"fmt": "none", "authData": auth_data, "attStmt": {}}
-        attestation_object = cbor.encode(att_obj)
+        # 6. 构造 attestationObject（使用 fido2.cbor 正确编码）
+        from fido2 import cbor as _fido2_cbor
+        attestation_object = _fido2_cbor.encode({
+            "fmt": "none",
+            "authData": auth_data,
+            "attStmt": {},
+        })
+
+        # 导出私钥（PEM），用于后续登录签名
+        from cryptography.hazmat.primitives.serialization import (
+            Encoding, PrivateFormat, NoEncryption
+        )
+        private_key_pem = private_key.private_bytes(
+            Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()
+        ).decode()
 
         logger.info("[Passkey] FIDO2 凭证生成成功 id=%s", cred_id_b64[:16])
         return {
             'id': cred_id_b64,
-            'rawId': credential_id,
+            'rawId': credential_id,           # bytes, kept for reference
+            'rawIdB64': cred_id_b64,          # string (base64url), for raw_id:string
             'clientDataJSON': client_data_json,
             'attestationObject': attestation_object,
+            'privateKeyPem': private_key_pem, # 私钥，登录时签名用
         }
 
     # ------------------------------------------------------------------
@@ -805,12 +817,11 @@ class PasskeyManager:
         try:
             resp_obj = _make_input_passkey_credential_response(
                 client_data_json=credential['clientDataJSON'],
-                attestation_object=credential['attestationObject'],
+                attestation_data=credential['attestationObject'],
             )
             cred_obj = _make_input_passkey_credential(
                 credential_id=credential['id'],
-                credential_type='public-key',
-                raw_id=credential['rawId'],
+                raw_id_b64=credential['rawIdB64'],
                 response=resp_obj,
             )
             request = _make_register_passkey_request(cred_obj)
@@ -823,23 +834,23 @@ class PasskeyManager:
             else:
                 pk_id = credential['id']
             logger.info("[Passkey] registerPasskey 成功 id=%s", pk_id[:16])
-            return True, pk_id, ""
+            return True, pk_id, "", credential.get('privateKeyPem', '')
         except asyncio.TimeoutError:
             msg = f"registerPasskey 超时({REGISTER_PASSKEY_TIMEOUT}s)"
             logger.error("[Passkey] %s", msg)
-            return False, "", msg
+            return False, "", msg, ""
         except Exception as e:
             logger.warning("[Passkey] registerPasskey 失败: %s", e)
-            return False, "", str(e)
+            return False, "", str(e), ""
 
     # ------------------------------------------------------------------
     # 内部：为单账号创建 Passkey（init → build → register）
     # ------------------------------------------------------------------
     async def _create_passkey_for_account(
         self, client, passkey_name: str = "Telegram"
-    ) -> Tuple[bool, str, str]:
+    ) -> Tuple[bool, str, str, str]:
         """
-        组合三步完成 Passkey 创建，返回 (success, passkey_id, error)
+        组合三步完成 Passkey 创建，返回 (success, passkey_id, error, private_key_pem)
         """
         # Step 1: 获取注册选项
         try:
@@ -847,17 +858,17 @@ class PasskeyManager:
         except asyncio.TimeoutError:
             msg = f"initPasskeyRegistration 超时({INIT_PASSKEY_TIMEOUT}s)"
             logger.error("[Passkey] %s", msg)
-            return False, "", msg
+            return False, "", msg, ""
         except Exception as e:
             logger.warning("[Passkey] initPasskeyRegistration 失败: %s", e)
-            return False, "", str(e)
+            return False, "", str(e), ""
 
         # Step 2: 软件模拟生成 FIDO2 凭证
         try:
             credential = self._build_fido2_credential(options, passkey_name)
         except Exception as e:
             logger.error("[Passkey] 生成FIDO2凭证失败: %s", e, exc_info=True)
-            return False, "", f"生成凭证失败: {e}"
+            return False, "", f"生成凭证失败: {e}", ""
 
         # Step 3: 提交注册
         return await self._register_passkey(client, credential)
@@ -1017,12 +1028,13 @@ class PasskeyManager:
             # 4. 创建 Passkey
             logger.info("[Passkey] %s: 开始创建Passkey...", file_name)
             print(f"[Passkey]   {file_name}: 创建Passkey...")
-            success, pk_id, error = await self._create_passkey_for_account(
+            success, pk_id, error, priv_pem = await self._create_passkey_for_account(
                 client, passkey_name
             )
             if success:
                 result.status = 'created'
                 result.passkey_id = pk_id
+                result.private_key_pem = priv_pem
                 logger.info("[Passkey] %s: Passkey 创建成功 id=%s",
                             file_name, pk_id[:16] if pk_id else '')
                 print(f"[Passkey]   {file_name}: ✓ Passkey 创建成功")
@@ -1099,6 +1111,7 @@ class PasskeyManager:
                         "account": r.account_name,
                         "passkey_id": r.passkey_id,
                         "passkey_name": r.passkey_name,
+                        "private_key_pem": r.private_key_pem,
                         "created_at": time.strftime('%Y-%m-%d %H:%M:%S'),
                     }
                     zf.writestr(
