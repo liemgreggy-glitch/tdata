@@ -8371,6 +8371,8 @@ body{
 .tag.banned{color:#fff;background:#f44336;font-size:11px}
 .tag.unauth{color:#fff;background:#ff9800;font-size:10px}
 .tag.off{color:#f44336;background:#fce4ec}
+.tag.frozen{color:#fff;background:#ff6f00;font-size:11px}
+.tag.multi{color:#fff;background:#7b1fa2;font-size:11px}
 .val{font-size:20px;font-weight:700;color:#1565c0;letter-spacing:4px;flex:1}
 .val.wait{color:#999;font-size:14px;font-weight:400;letter-spacing:0}
 .cbtn{
@@ -8532,8 +8534,10 @@ fetch(PREFIX+'/api/account_status/'+apiKey)
   .then(function(d) {
     var tag = document.getElementById('status-tag');
     if (!tag) return;
-    if (d.status === 'banned') { tag.textContent = '账号已封禁'; tag.className = 'tag banned'; }
+    if (d.status === 'banned') { tag.textContent = '已封禁'; tag.className = 'tag banned'; }
     else if (d.status === 'unauthorized') { tag.textContent = '授权失效'; tag.className = 'tag unauth'; }
+    else if (d.status === 'frozen') { tag.textContent = '已冻结'; tag.className = 'tag frozen'; }
+    else if (d.status === 'multi') { tag.textContent = '多设备冲突'; tag.className = 'tag multi'; }
     else { tag.textContent = '正常'; tag.className = 'tag ok'; }
   }).catch(function() {
     var tag = document.getElementById('status-tag');
@@ -8653,17 +8657,29 @@ def _afc_start_web_server(self):
                     from telethon import TelegramClient
                     from telethon.errors import (
                         UserDeactivatedBanError, UserDeactivatedError,
-                        AuthKeyUnregisteredError, PhoneNumberBannedError
+                        AuthKeyUnregisteredError, PhoneNumberBannedError,
+                        AuthKeyDuplicatedError,
                     )
                     sess = session_path.replace('.session', '') if session_path.endswith('.session') else session_path
                     client = TelegramClient(sess, int(config.API_ID), str(config.API_HASH))
                     try:
                         await asyncio.wait_for(client.connect(), timeout=15)
                         auth = await asyncio.wait_for(client.is_user_authorized(), timeout=15)
-                        if auth:
-                            return 'active', '账号正常'
-                        else:
+                        if not auth:
                             return 'unauthorized', '账号已掉授权'
+                        # 授权成功后检查冻结状态：读取 777000 最近消息
+                        try:
+                            frozen_keywords = ['your account is frozen', 'account has been frozen', 'account is frozen', 'frozen']
+                            msgs = await asyncio.wait_for(client.get_messages(777000, limit=5), timeout=10)
+                            for msg in msgs:
+                                text = (getattr(msg, 'raw_text', '') or getattr(msg, 'message', '') or '').lower()
+                                if any(kw in text for kw in frozen_keywords):
+                                    return 'frozen', '账号已冻结'
+                        except Exception:
+                            pass
+                        return 'active', '账号正常'
+                    except AuthKeyDuplicatedError:
+                        return 'multi', '多设备冲突，授权Key重复'
                     except (UserDeactivatedBanError, PhoneNumberBannedError):
                         return 'banned', '账号已被封禁'
                     except UserDeactivatedError:
@@ -8676,6 +8692,10 @@ def _afc_start_web_server(self):
                             return 'banned', '账号已被封禁'
                         if 'auth' in err and 'unregistered' in err:
                             return 'unauthorized', '授权已失效'
+                        if 'frozen' in err:
+                            return 'frozen', '账号已冻结'
+                        if 'duplicated' in err or 'duplicate' in err:
+                            return 'multi', '多设备冲突'
                         return old_status, str(e)
                     finally:
                         try:
