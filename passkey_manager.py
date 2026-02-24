@@ -351,7 +351,6 @@ def _register_login_tl_classes():
         return
     from telethon.tl.tlobject import TLObject as _TLO, TLRequest as _TLR
     from telethon.tl.alltlobjects import tlobjects
-    global _InputPasskeyResponseLogin, _InitPasskeyLoginRequest, _FinishPasskeyLoginRequest
 
     # inputPasskeyResponseLogin#c31fc14a
     # client_data:DataJSON  authenticator_data:bytes  signature:bytes
@@ -419,6 +418,7 @@ def _register_login_tl_classes():
     tlobjects[_IPL.CONSTRUCTOR_ID]  = _IPL
     tlobjects[_FPL.CONSTRUCTOR_ID]  = _FPL
 
+    global _InputPasskeyResponseLogin, _InitPasskeyLoginRequest, _FinishPasskeyLoginRequest
     _InputPasskeyResponseLogin = _IPRL
     _InitPasskeyLoginRequest   = _IPL
     _FinishPasskeyLoginRequest = _FPL
