@@ -174,8 +174,14 @@ def _make_delete_passkey_request(passkey_id: str):
         def _bytes(self):
             import struct
             id_bytes = self.id.encode('utf-8')
-            return struct.pack('<I', self.CONSTRUCTOR_ID) + \
-                   struct.pack('<I', len(id_bytes)) + id_bytes
+            n = len(id_bytes)
+            if n < 254:
+                header = bytes([n])
+                padding = b'\x00' * ((-(n + 1)) % 4)
+            else:
+                header = bytes([254]) + struct.pack('<I', n)[:3]
+                padding = b'\x00' * ((-n) % 4)
+            return struct.pack('<I', self.CONSTRUCTOR_ID) + header + id_bytes + padding
 
     return _DeletePasskeyRequest(id=passkey_id)
 
@@ -591,7 +597,11 @@ class PasskeyManager:
                     logger.warning(f"[Passkey] {file_name}: Passkey [{pk_label}] 删除失败: {err}")
                     print(f"[Passkey]   {file_name}: ✗ Passkey [{pk_label}] 删除失败: {err}")
 
-            result.status = 'deleted'
+            if result.delete_failed and result.deleted_count == 0:
+                result.status = 'failed'
+                result.error = '所有Passkey删除失败: ' + '; '.join(result.delete_failed)
+            else:
+                result.status = 'deleted'
 
         except Exception as e:
             result.status = 'failed'
