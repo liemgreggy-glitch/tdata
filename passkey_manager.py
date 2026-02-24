@@ -336,6 +336,97 @@ _InputPasskeyCredential         = None
 _RegisterPasskeyRequest         = None
 _register_tl_classes()
 
+
+# ---------------------------------------------------------------------------
+# 登录专用 TL 类（只定义一次）
+# ---------------------------------------------------------------------------
+_InputPasskeyResponseLogin = None
+_InitPasskeyLoginRequest   = None
+_FinishPasskeyLoginRequest = None
+
+
+def _register_login_tl_classes():
+    """注册 Passkey 登录相关的 TL 类，只执行一次。"""
+    if not TELETHON_AVAILABLE:
+        return
+    from telethon.tl.tlobject import TLObject as _TLO, TLRequest as _TLR
+    from telethon.tl.alltlobjects import tlobjects
+    global _InputPasskeyResponseLogin, _InitPasskeyLoginRequest, _FinishPasskeyLoginRequest
+
+    # inputPasskeyResponseLogin#c31fc14a
+    # client_data:DataJSON  authenticator_data:bytes  signature:bytes
+    class _IPRL(_TLO):
+        CONSTRUCTOR_ID = 0xc31fc14a
+        SUBCLASS_OF_ID = 0xc31fc14a
+        def __init__(self, client_data_json: bytes, authenticator_data: bytes,
+                     signature: bytes):
+            self.client_data_json = client_data_json
+            self.authenticator_data = authenticator_data
+            self.signature = signature
+        def to_dict(self):
+            return {'_': 'inputPasskeyResponseLogin',
+                    'client_data': self.client_data_json.decode(),
+                    'authenticator_data': self.authenticator_data,
+                    'signature': self.signature}
+        def _bytes(self):
+            # DataJSON#7d748d04 data:string
+            data_json_bytes = (
+                struct.pack('<I', 0x7d748d04)
+                + _tl_str(self.client_data_json.decode())
+            )
+            return (struct.pack('<I', self.CONSTRUCTOR_ID)
+                    + data_json_bytes
+                    + _tl_bytes(self.authenticator_data)
+                    + _tl_bytes(self.signature))
+
+    # account.initPasskeyLogin#518ad0b7
+    class _IPL(_TLR):
+        CONSTRUCTOR_ID = 0x518ad0b7
+        SUBCLASS_OF_ID = 0x518ad0b7
+        def __init__(self):
+            pass
+        def to_dict(self):
+            return {'_': 'account.initPasskeyLogin'}
+        def _bytes(self):
+            return struct.pack('<I', self.CONSTRUCTOR_ID)
+        @staticmethod
+        def read_result(reader):
+            reader.read_int(signed=False)   # skip response constructor id
+            json_obj = reader.tgread_object()  # DataJSON
+            return json_obj
+
+    # account.finishPasskeyLogin#9857ad07
+    # credential:InputPasskeyCredential
+    class _FPL(_TLR):
+        CONSTRUCTOR_ID = 0x9857ad07
+        SUBCLASS_OF_ID = 0x9857ad07
+        def __init__(self, credential):
+            self.credential = credential
+        def to_dict(self):
+            return {'_': 'account.finishPasskeyLogin',
+                    'credential': self.credential.to_dict()}
+        def _bytes(self):
+            return (struct.pack('<I', self.CONSTRUCTOR_ID)
+                    + bytes(self.credential))
+        @staticmethod
+        def read_result(reader):
+            try:
+                return reader.tgread_object()
+            except Exception:
+                return None
+
+    tlobjects[_IPRL.CONSTRUCTOR_ID] = _IPRL
+    tlobjects[_IPL.CONSTRUCTOR_ID]  = _IPL
+    tlobjects[_FPL.CONSTRUCTOR_ID]  = _FPL
+
+    _InputPasskeyResponseLogin = _IPRL
+    _InitPasskeyLoginRequest   = _IPL
+    _FinishPasskeyLoginRequest = _FPL
+
+
+_register_login_tl_classes()
+
+
 def _make_input_passkey_credential_response(client_data_json: bytes,
                                             attestation_data: bytes):
     # inputPasskeyResponseRegister: client_data:DataJSON attestation_data:bytes
@@ -393,6 +484,19 @@ class PasskeyCreateResult:
     passkey_id: str = ""
     passkey_name: str = ""
     private_key_pem: str = ""  # EC P-256 私钥 PEM，登录时签名用
+    error: Optional[str] = None
+    elapsed: float = 0.0
+
+
+@dataclass
+class PasskeyLoginResult:
+    passkey_file: str           # .passkey 文件名
+    phone: str = ""
+    user_id: int = 0
+    first_name: str = ""
+    username: str = ""
+    session_string: str = ""
+    status: str = "pending"     # pending / success / failed
     error: Optional[str] = None
     elapsed: float = 0.0
 
@@ -1066,6 +1170,323 @@ class PasskeyManager:
 
         result.elapsed = time.time() - start
         return result
+
+    # ------------------------------------------------------------------
+    # 公共接口：Passkey 登录 → 导出 Session
+    # ------------------------------------------------------------------
+    async def passkey_login_from_file(self, passkey_file_path: str) -> dict:
+        """
+        读取 .passkey JSON 文件，用私钥签名完成 Telegram WebAuthn 登录，
+        返回 {success, phone, user_id, first_name, username, session_string, error}
+        """
+        start = time.time()
+        result = {
+            'success': False,
+            'phone': '',
+            'user_id': 0,
+            'first_name': '',
+            'username': '',
+            'session_string': '',
+            'error': '',
+        }
+
+        try:
+            with open(passkey_file_path, 'r', encoding='utf-8') as f:
+                pk_data = json.load(f)
+
+            passkey_id = pk_data.get('passkey_id', '')
+            priv_pem   = pk_data.get('private_key_pem', '')
+            phone      = pk_data.get('phone', '')
+
+            if not priv_pem:
+                result['error'] = '私钥为空，旧版注册未保存私钥'
+                return result
+            if not passkey_id:
+                result['error'] = 'passkey_id 为空'
+                return result
+
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.backends import default_backend
+            from telethon import TelegramClient
+            from telethon.sessions import StringSession
+
+            private_key = serialization.load_pem_private_key(
+                priv_pem.encode(), password=None, backend=default_backend()
+            )
+
+            api_id, api_hash = self._get_api_credentials()
+            proxy_dict = self._get_proxy()
+            kwargs = {'proxy': proxy_dict} if proxy_dict else {}
+
+            client = TelegramClient(StringSession(), api_id, api_hash, **kwargs)
+            try:
+                await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT)
+
+                # 1. initPasskeyLogin → 获取 challenge
+                if _InitPasskeyLoginRequest is None:
+                    _register_login_tl_classes()
+                init_req = _InitPasskeyLoginRequest()
+                response = await asyncio.wait_for(
+                    client(init_req), timeout=INIT_PASSKEY_TIMEOUT
+                )
+                if hasattr(response, 'data'):
+                    raw = response.data
+                elif isinstance(response, str):
+                    raw = response
+                else:
+                    raw = str(response)
+                options = json.loads(raw)
+
+                options = options.get('publicKey', options)
+                challenge_raw = options.get('challenge', '')
+                if isinstance(challenge_raw, str):
+                    challenge_bytes = _b64url_decode(challenge_raw)
+                else:
+                    challenge_bytes = bytes(challenge_raw)
+
+                rp_info = options.get('rp', {})
+                rp_id = rp_info.get('id', 'telegram.org')
+                origin = 'https://web.telegram.org'
+
+                # 2. 构造 clientDataJSON (type="webauthn.get")
+                client_data = {
+                    'type': 'webauthn.get',
+                    'challenge': challenge_raw if isinstance(challenge_raw, str)
+                                 else _b64url_encode(challenge_bytes),
+                    'origin': origin,
+                    'crossOrigin': False,
+                }
+                client_data_json = json.dumps(
+                    client_data, separators=(',', ':')
+                ).encode()
+
+                # 3. 构造 authenticatorData = SHA256(rpId) + flags(0x05) + counter(0)
+                rp_id_hash = hashlib.sha256(rp_id.encode()).digest()
+                flags = struct.pack('B', 0x05)          # UP(0x01) | UV(0x04)
+                sign_count = struct.pack('>I', 0)
+                authenticator_data = rp_id_hash + flags + sign_count
+
+                # 4. 签名：ECDSA P-256 SHA-256(authData || SHA256(clientDataJSON))
+                client_data_hash = hashlib.sha256(client_data_json).digest()
+                signed_data = authenticator_data + client_data_hash
+                signature = private_key.sign(
+                    signed_data, ec.ECDSA(hashes.SHA256())
+                )
+
+                # 5. 构造登录凭证并提交 finishPasskeyLogin
+                login_resp = _InputPasskeyResponseLogin(
+                    client_data_json=client_data_json,
+                    authenticator_data=authenticator_data,
+                    signature=signature,
+                )
+                # Reuse _InputPasskeyCredential (same constructor as registration)
+                cred = _InputPasskeyCredential(
+                    id=passkey_id,
+                    raw_id=passkey_id,
+                    response=login_resp,
+                )
+                finish_req = _FinishPasskeyLoginRequest(credential=cred)
+                auth = await asyncio.wait_for(
+                    client(finish_req), timeout=REGISTER_PASSKEY_TIMEOUT
+                )
+                logger.info("[Passkey] finishPasskeyLogin 成功: %s", auth)
+
+                # 6. 获取用户信息
+                try:
+                    me = await asyncio.wait_for(
+                        client.get_me(), timeout=GET_ME_TIMEOUT
+                    )
+                    if me:
+                        result['phone'] = getattr(me, 'phone', phone) or phone
+                        result['user_id'] = getattr(me, 'id', 0) or 0
+                        result['first_name'] = getattr(me, 'first_name', '') or ''
+                        result['username'] = getattr(me, 'username', '') or ''
+                except Exception:
+                    result['phone'] = phone
+
+                # 7. 导出 session string
+                result['session_string'] = client.session.save()
+                result['success'] = True
+
+            finally:
+                try:
+                    await asyncio.wait_for(
+                        client.disconnect(), timeout=DISCONNECT_TIMEOUT
+                    )
+                except Exception:
+                    pass
+
+        except Exception as e:
+            logger.error("[Passkey] passkey_login_from_file 失败: %s", e,
+                         exc_info=True)
+            result['error'] = str(e)
+
+        result['elapsed'] = round(time.time() - start, 1)
+        return result
+
+    async def batch_login_from_passkeys(
+        self,
+        files: List[Tuple[str, str]],   # [(passkey_file_path, display_name)]
+        progress_callback=None,
+        concurrent: int = DEFAULT_CONCURRENT,
+    ) -> Dict[str, List[PasskeyLoginResult]]:
+        """批量 passkey 登录，返回 {'success': [...], 'failed': [...]}"""
+        total = len(files)
+        logger.info("[Passkey] 批量登录开始: 共 %d 个文件, 并发=%d", total, concurrent)
+        print(f"[Passkey] ▶ 批量登录开始: 共 {total} 个文件 | 并发={concurrent}")
+
+        semaphore = asyncio.Semaphore(concurrent)
+        results: List[PasskeyLoginResult] = []
+        done_count = 0
+
+        async def _login_with_sem(file_path, file_name):
+            nonlocal done_count
+            async with semaphore:
+                start = time.time()
+                r = PasskeyLoginResult(passkey_file=file_name)
+                try:
+                    data = await asyncio.wait_for(
+                        self.passkey_login_from_file(file_path),
+                        timeout=ACCOUNT_TOTAL_TIMEOUT,
+                    )
+                    if data['success']:
+                        r.status = 'success'
+                        r.phone = data.get('phone', '')
+                        r.user_id = data.get('user_id', 0)
+                        r.first_name = data.get('first_name', '')
+                        r.username = data.get('username', '')
+                        r.session_string = data.get('session_string', '')
+                    else:
+                        r.status = 'failed'
+                        r.error = data.get('error') or 'unknown error'
+                except asyncio.TimeoutError:
+                    r.status = 'failed'
+                    r.error = f'login timeout({ACCOUNT_TOTAL_TIMEOUT}s)'
+                except Exception as e:
+                    r.status = 'failed'
+                    r.error = str(e)
+                r.elapsed = round(time.time() - start, 1)
+                results.append(r)
+                done_count += 1
+                icon = '✅' if r.status == 'success' else '❌'
+                print(
+                    f"[Passkey] {icon} [{done_count}/{total}] {file_name} => {r.status}"
+                    + (f" | 错误: {r.error}" if r.error else "")
+                )
+                if progress_callback:
+                    try:
+                        await progress_callback(done_count, total, r)
+                    except Exception as cb_err:
+                        logger.warning("[Passkey] 进度回调异常: %s", cb_err)
+
+        tasks = [
+            asyncio.create_task(_login_with_sem(fp, fn))
+            for fp, fn in files
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        categorized: Dict[str, List[PasskeyLoginResult]] = {
+            'success': [],
+            'failed': [],
+        }
+        for r in results:
+            if r.status == 'success':
+                categorized['success'].append(r)
+            else:
+                categorized['failed'].append(r)
+
+        success = len(categorized['success'])
+        failed = len(categorized['failed'])
+        logger.info("[Passkey] 批量登录完成: 成功=%d, 失败=%d", success, failed)
+        print(f"[Passkey] ■ 批量登录完成: ✅成功={success} | ❌失败={failed}")
+        return categorized
+
+    def create_result_files_for_login(
+        self,
+        results: Dict[str, List[PasskeyLoginResult]],
+        task_id: str,
+    ) -> List[Tuple[str, str, str, int]]:
+        """
+        成功的账号：每个生成 {phone}_session.json，打包到 passkey_sessions.zip
+        失败的账号：生成失败报告 passkey_login_failed.zip
+        返回: [(zip_path, filename, caption, size_bytes), ...]
+        """
+        api_id, api_hash = self._get_api_credentials()
+        logger.info("[Passkey] 开始打包登录结果文件 task_id=%s", task_id)
+        print("[Passkey] 📦 打包登录结果文件...")
+        output = []
+        base_dir = tempfile.mkdtemp(prefix=f"passkey_login_{task_id}_")
+
+        # ── 成功：生成 {phone}_session.json 并打包 ───────────────────────
+        success_results = results.get('success', [])
+        if success_results:
+            zip_name = "passkey_sessions.zip"
+            zip_path = os.path.join(base_dir, zip_name)
+            count = len(success_results)
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for r in success_results:
+                    phone = r.phone.strip() if r.phone else ""
+                    file_stem = phone if phone else os.path.splitext(r.passkey_file)[0]
+                    json_filename = f"{file_stem}_session.json"
+
+                    session_data = {
+                        "phone": r.phone,
+                        "user_id": r.user_id,
+                        "first_name": r.first_name,
+                        "username": r.username,
+                        "session_string": r.session_string,
+                        "api_id": api_id,
+                        "api_hash": api_hash,
+                    }
+                    zf.writestr(
+                        json_filename,
+                        json.dumps(session_data, ensure_ascii=False, indent=2).encode('utf-8'),
+                    )
+
+            size = os.path.getsize(zip_path)
+            caption = f"✅ 登录成功：{count} 个"
+            logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
+            print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
+            output.append((zip_path, zip_name, caption, size))
+
+        # ── 失败：打包失败报告 ───────────────────────────────────────────
+        failed_results = results.get('failed', [])
+        if failed_results:
+            count = len(failed_results)
+            zip_name = "passkey_login_failed.zip"
+            zip_path = os.path.join(base_dir, zip_name)
+
+            report_lines = [
+                "Passkey 登录失败报告",
+                f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"账号数量: {count}",
+                "",
+            ]
+            for r in failed_results:
+                report_lines.append(f"文件: {r.passkey_file}")
+                if r.phone:
+                    report_lines.append(f"  手机号: {r.phone}")
+                report_lines.append(f"  错误: {r.error or '未知错误'}")
+                report_lines.append("")
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(
+                    "passkey_login_report.txt",
+                    "\n".join(report_lines).encode('utf-8'),
+                )
+
+            size = os.path.getsize(zip_path)
+            caption = f"❌ 登录失败：{count} 个"
+            logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
+            print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
+            output.append((zip_path, zip_name, caption, size))
+
+        logger.info("[Passkey] 打包完成，共 %d 个ZIP文件", len(output))
+        print(f"[Passkey] 📦 打包完成，共 {len(output)} 个ZIP文件")
+        return output
 
     # ------------------------------------------------------------------
     # 结果文件打包（创建 Passkey 专用）

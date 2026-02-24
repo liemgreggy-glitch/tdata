@@ -2992,6 +2992,7 @@ TEXTS = {
     'passkey_submenu_desc': 'Please choose an action:',
     'passkey_btn_detect_delete': '🗑️ Detect & Delete Passkeys',
     'passkey_btn_create': '➕ Create Passkey',
+    'passkey_btn_login': '🔑 Passkey Login',
     # Create Passkey flow
     'passkey_create_title': '➕ Create Passkey',
     'passkey_create_desc1': '· Software-simulated FIDO2 device — no hardware required',
@@ -3014,4 +3015,16 @@ TEXTS = {
     'passkey_create_elapsed': '⏱️ Total time: {seconds}s',
     'passkey_create_packing': '📦 Packing result files...',
     'passkey_create_send_failed': '⚠️ Failed to send creation result files, check logs',
+    # Passkey Login flow
+    'passkey_login_title': '🔑 Passkey Login → Export Session',
+    'passkey_login_upload_prompt': '📤 Upload ZIP containing .passkey files',
+    'passkey_login_desc1': '· Supports batch: ZIP can contain multiple .passkey files',
+    'passkey_login_desc2': '· Returns session.json format on success',
+    'passkey_login_desc3': '· .passkey file must contain private_key_pem field',
+    'passkey_login_processing': '🔑 Passkey login in progress...',
+    'passkey_login_stat_success': '✅ Success: {count}',
+    'passkey_login_stat_failed': '❌ Failed: {count}',
+    'passkey_login_complete': '🎉 Passkey login complete!',
+    'passkey_login_no_files': '❌ No .passkey files found in ZIP',
+    'passkey_login_packing': '📦 Packing session files...',
 }

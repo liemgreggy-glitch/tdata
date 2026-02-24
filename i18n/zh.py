@@ -2993,6 +2993,7 @@ TEXTS = {
     'passkey_submenu_desc': '请选择操作：',
     'passkey_btn_detect_delete': '🗑️ 检测并删除 Passkey',
     'passkey_btn_create': '➕ 创建 Passkey',
+    'passkey_btn_login': '🔑 Passkey 登录',
     # 创建 Passkey 流程
     'passkey_create_title': '➕ 创建 Passkey（通行密钥）',
     'passkey_create_desc1': '· 使用软件模拟 FIDO2 设备，无需物理设备',
@@ -3015,4 +3016,16 @@ TEXTS = {
     'passkey_create_elapsed': '⏱️ 总用时：{seconds} 秒',
     'passkey_create_packing': '📦 正在打包结果文件...',
     'passkey_create_send_failed': '⚠️ 创建结果文件发送失败，请检查日志',
+    # Passkey 登录流程
+    'passkey_login_title': '🔑 Passkey 登录 → 导出 Session',
+    'passkey_login_upload_prompt': '📤 请上传含 .passkey 文件的 ZIP',
+    'passkey_login_desc1': '· 支持批量，ZIP 内可含多个 .passkey 文件',
+    'passkey_login_desc2': '· 登录成功后返回 session.json 格式',
+    'passkey_login_desc3': '· .passkey 文件须含 private_key_pem 字段',
+    'passkey_login_processing': '🔑 Passkey 登录中...',
+    'passkey_login_stat_success': '✅ 成功：{count}',
+    'passkey_login_stat_failed': '❌ 失败：{count}',
+    'passkey_login_complete': '🎉 Passkey 登录完成！',
+    'passkey_login_no_files': '❌ ZIP 内未找到 .passkey 文件',
+    'passkey_login_packing': '📦 正在打包 Session 文件...',
 }
