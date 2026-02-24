@@ -11118,6 +11118,10 @@ class EnhancedBot:
         
         # 通讯录限制检测待处理任务
         self.pending_contact_limit_check: Dict[int, Dict[str, Any]] = {}
+
+        # Passkey 检测与删除待处理任务
+        self._passkey_tasks: Dict[int, Dict[str, Any]] = {}
+        self._passkey_manager = None  # 懒初始化
         
         # 常量定义
         self.MAX_DISPLAY_ITEMS = 20  # 配置预览最大显示条目数
@@ -11683,6 +11687,7 @@ class EnhancedBot:
                 InlineKeyboardButton(t(user_id, 'btn_check_contact_limit'), callback_data="check_contact_limit")
             ],
             [
+                InlineKeyboardButton(t(user_id, 'btn_passkey_manage'), callback_data="passkey_manage"),
                 InlineKeyboardButton(t(user_id, 'btn_vip_menu'), callback_data="vip_menu")
             ]
         ]
@@ -12836,6 +12841,10 @@ class EnhancedBot:
             self.handle_profile_update_callbacks(update, context, query, data)
         elif data == "check_contact_limit":
             self.handle_check_contact_limit(query)
+        elif data == "passkey_manage":
+            self.handle_passkey_start(query)
+        elif data == "passkey_execute":
+            self.handle_passkey_execute(update, context, query)
         elif data == "language_menu":
             # 显示语言选择菜单
             self.show_language_menu(update, user_id)
@@ -14394,6 +14403,7 @@ class EnhancedBot:
                 "waiting_add_2fa_file",
                 "waiting_remove_2fa_file",
                 "waiting_cleanup_file",
+                "waiting_passkey_file",
                 "batch_create_upload",
                 "batch_create_names",
                 "batch_create_usernames",
@@ -14565,6 +14575,21 @@ class EnhancedBot:
                     traceback.print_exc()
             thread = threading.Thread(target=process_cleanup, daemon=True)
             thread.start()
+        elif user_status == "waiting_passkey_file":
+            # Passkey 检测与删除处理
+            def process_passkey():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.process_passkey_upload(update, context, document))
+                    loop.close()
+                except asyncio.CancelledError:
+                    print(f"[process_passkey] 任务被取消")
+                except Exception as e:
+                    print(f"[process_passkey] 处理异常: {e}")
+                    import traceback
+                    traceback.print_exc()
+            threading.Thread(target=process_passkey, daemon=True).start()
         elif user_status == "batch_create_upload":
             # 批量创建文件处理
             def process_batch_create():
@@ -29077,6 +29102,308 @@ o5eth</code>
             print("\n👋 机器人已停止")
         except Exception as e:
             print(f"\n❌ 运行错误: {e}")
+
+    # ================================================================
+    # Passkey 通行密钥管理
+    # ================================================================
+
+    def handle_passkey_start(self, query):
+        """显示 Passkey 功能介绍菜单"""
+        query.answer()
+        user_id = query.from_user.id
+
+        # 检查会员权限
+        is_member, _, _ = self.db.check_membership(user_id)
+        if not is_member and not self.db.is_admin(user_id):
+            self.safe_edit_message(query, "❌ 需要会员权限才能使用 Passkey 管理功能")
+            return
+
+        text = f"""
+{t(user_id, 'passkey_title')}
+
+<b>{t(user_id, 'passkey_feature1')}</b>
+{t(user_id, 'passkey_feature2')}
+{t(user_id, 'passkey_feature3')}
+
+{t(user_id, 'passkey_what_is')}
+{t(user_id, 'passkey_what_desc1')}
+{t(user_id, 'passkey_what_desc2')}
+{t(user_id, 'passkey_what_desc3')}
+
+<b>{t(user_id, 'passkey_upload_prompt')}</b>
+        """
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🔙 {t(user_id, 'btn_back_to_menu')}", callback_data="back_to_main")]
+        ])
+
+        self.safe_edit_message(query, text, 'HTML', keyboard)
+
+        # 设置用户状态 - 等待上传文件
+        self.db.save_user(
+            user_id,
+            query.from_user.username or "",
+            query.from_user.first_name or "",
+            "waiting_passkey_file"
+        )
+
+    async def process_passkey_upload(self, update, context, document):
+        """处理用户上传的 Passkey ZIP 文件，扫描并显示确认按钮"""
+        user_id = update.effective_user.id
+        start_time = time.time()
+        task_id = f"{user_id}_{int(start_time)}"
+
+        progress_msg = self.safe_send_message(
+            update, f"📥 <b>{t(user_id, 'passkey_processing')}...</b>", 'HTML'
+        )
+        if not progress_msg:
+            return
+
+        temp_zip = None
+        temp_dir = None
+
+        try:
+            temp_dir = tempfile.mkdtemp(prefix="temp_passkey_")
+            temp_zip = os.path.join(temp_dir, document.file_name)
+            document.get_file().download(temp_zip)
+
+            files, extract_dir, file_type = self.processor.scan_zip_file(
+                temp_zip, user_id, task_id
+            )
+
+            if not files:
+                try:
+                    progress_msg.edit_text(
+                        f"❌ <b>{t(user_id, 'passkey_scan_complete')}</b>\n\n未找到有效文件，请确保 ZIP 包含 Session 或 TData 格式",
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
+                return
+
+            total = len(files)
+            type_text = "Session" if file_type == 'session' else "TData"
+
+            try:
+                progress_msg.edit_text(
+                    f"{t(user_id, 'passkey_scan_complete')}\n"
+                    f"{t(user_id, 'passkey_found_accounts').format(count=total, type=type_text)}\n\n"
+                    f"<b>{t(user_id, 'passkey_operation_desc')}</b>\n"
+                    f"{t(user_id, 'passkey_op1')}\n"
+                    f"{t(user_id, 'passkey_op2')}\n"
+                    f"{t(user_id, 'passkey_op3')}\n\n"
+                    f"{t(user_id, 'passkey_warning')}",
+                    parse_mode='HTML',
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton(t(user_id, 'passkey_btn_execute'), callback_data="passkey_execute"),
+                            InlineKeyboardButton("🔙 取消", callback_data="back_to_main"),
+                        ]
+                    ])
+                )
+            except Exception:
+                pass
+
+            # 保存任务信息
+            self._passkey_tasks[user_id] = {
+                'files': files,
+                'extract_dir': extract_dir,
+                'file_type': file_type,
+                'temp_dir': temp_dir,
+                'progress_msg': progress_msg,
+                'task_id': task_id,
+            }
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                progress_msg.edit_text(
+                    f"❌ <b>处理失败</b>\n\n错误: {str(e)}",
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def handle_passkey_execute(self, update, context, query):
+        """确认执行 Passkey 批量处理"""
+        user_id = query.from_user.id
+        query.answer()
+
+        if user_id not in self._passkey_tasks:
+            try:
+                query.edit_message_text("❌ 任务已过期，请重新上传文件")
+            except Exception:
+                pass
+            return
+
+        task = self._passkey_tasks[user_id]
+
+        try:
+            query.edit_message_text(
+                f"<b>{t(user_id, 'passkey_processing')}</b>\n\n"
+                f"{t(user_id, 'passkey_progress_bar').format(bar='░' * 20, pct=0)}\n"
+                f"{t(user_id, 'passkey_stat_no_passkey').format(count=0)}  "
+                f"{t(user_id, 'passkey_stat_deleted').format(count=0)}  "
+                f"{t(user_id, 'passkey_stat_failed').format(count=0)}",
+                parse_mode='HTML'
+            )
+            task['progress_msg'] = query.message
+        except Exception:
+            pass
+
+        def run_batch():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    self._execute_passkey_batch(
+                        context, query.message.chat_id, user_id,
+                        query.message.message_id, task
+                    )
+                )
+            finally:
+                loop.close()
+
+        threading.Thread(target=run_batch, daemon=True).start()
+
+    async def _execute_passkey_batch(self, context, chat_id, user_id, progress_msg_id, task):
+        """核心异步批量处理 Passkey"""
+        import time as _time
+
+        logger.info(f"[Passkey] _execute_passkey_batch 启动 user_id={user_id}")
+        print(f"[Passkey] ▶ _execute_passkey_batch 启动 user_id={user_id}")
+
+        # 懒初始化 PasskeyManager
+        if self._passkey_manager is None:
+            try:
+                from passkey_manager import PasskeyManager
+                self._passkey_manager = PasskeyManager(self.proxy_manager, self.db)
+                logger.info("[Passkey] PasskeyManager 初始化成功")
+                print("[Passkey] PasskeyManager 初始化成功")
+            except Exception as e:
+                try:
+                    context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=progress_msg_id,
+                        text=f"❌ <b>PasskeyManager 初始化失败</b>\n\n{str(e)}",
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
+                return
+
+        files = task['files']
+        file_type = task['file_type']
+        task_id = task['task_id']
+        total = len(files)
+
+        stats = {'no_passkey': 0, 'deleted': 0, 'failed': 0}
+        last_update_time = _time.time()
+        UPDATE_INTERVAL = 5  # 每5秒更新一次进度
+
+        def make_progress_text(done, total, stats):
+            pct = int(done / total * 100) if total else 0
+            filled = int(pct / 5)
+            bar = '█' * filled + '░' * (20 - filled)
+            return (
+                f"<b>{t(user_id, 'passkey_processing')}</b>\n\n"
+                f"{t(user_id, 'passkey_progress_bar').format(bar=bar, pct=pct)} ({done}/{total})\n\n"
+                f"{t(user_id, 'passkey_stat_no_passkey').format(count=stats['no_passkey'])}\n"
+                f"{t(user_id, 'passkey_stat_deleted').format(count=stats['deleted'])}\n"
+                f"{t(user_id, 'passkey_stat_failed').format(count=stats['failed'])}"
+            )
+
+        async def on_progress(done, total, result):
+            nonlocal last_update_time
+            if result.status == 'no_passkey':
+                stats['no_passkey'] += 1
+            elif result.status == 'deleted':
+                stats['deleted'] += 1
+            else:
+                stats['failed'] += 1
+
+            now = _time.time()
+            if now - last_update_time >= UPDATE_INTERVAL or done == total:
+                last_update_time = now
+                try:
+                    context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=progress_msg_id,
+                        text=make_progress_text(done, total, stats),
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
+
+        start = _time.time()
+        logger.info(f"[Passkey] 调用 batch_process: {len(files)} 个账号, 类型={file_type}")
+        print(f"[Passkey] 开始批量处理 {len(files)} 个账号...")
+        results = await self._passkey_manager.batch_process(
+            files, file_type, progress_callback=on_progress
+        )
+        elapsed = _time.time() - start
+        logger.info(f"[Passkey] batch_process 完成, 耗时 {round(elapsed, 1)}s")
+
+        # 显示完成统计
+        no_pk = len(results.get('no_passkey', []))
+        deleted = len(results.get('deleted', []))
+        failed = len(results.get('failed', []))
+        total_deleted_keys = sum(r.deleted_count for r in results.get('deleted', []))
+
+        summary = (
+            f"{t(user_id, 'passkey_complete')}\n\n"
+            f"{t(user_id, 'passkey_result_no_passkey').format(count=no_pk)}\n"
+            f"{t(user_id, 'passkey_result_deleted').format(count=deleted)}\n"
+            f"{t(user_id, 'passkey_result_deleted_count').format(count=total_deleted_keys)}\n"
+            f"{t(user_id, 'passkey_result_failed').format(count=failed)}\n\n"
+            f"{t(user_id, 'passkey_elapsed').format(seconds=round(elapsed, 1))}\n\n"
+            f"{t(user_id, 'passkey_packing')}"
+        )
+        try:
+            context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=progress_msg_id,
+                text=summary,
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
+
+        # 打包并发送结果文件
+        try:
+            result_files = self._passkey_manager.create_result_files(
+                results, files, task_id, file_type, user_id
+            )
+            for zip_path, zip_name, caption, size in result_files:
+                try:
+                    with open(zip_path, 'rb') as f:
+                        context.bot.send_document(
+                            chat_id=chat_id,
+                            document=f,
+                            filename=zip_name,
+                            caption=caption,
+                        )
+                except Exception as send_err:
+                    print(f"[passkey] 发送结果文件失败: {send_err}")
+        except Exception as e:
+            print(f"[passkey] 打包结果文件失败: {e}")
+            try:
+                context.bot.send_message(
+                    chat_id=chat_id,
+                    text=t(user_id, 'passkey_send_failed'),
+                )
+            except Exception:
+                pass
+
+        # 清理任务
+        if user_id in self._passkey_tasks:
+            t_info = self._passkey_tasks.pop(user_id)
+            td = t_info.get('temp_dir')
+            if td and os.path.exists(td):
+                shutil.rmtree(td, ignore_errors=True)
 
 # ================================
 # 创建示例代理文件
