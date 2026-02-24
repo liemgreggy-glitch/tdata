@@ -1339,7 +1339,13 @@ class PasskeyManager:
             proxy_dict = self._get_proxy()
             playwright_proxy = None
             if proxy_dict:
-                ptype = (proxy_dict.get('proxy_type') or 'socks5').lower()
+                proxy_type_val = proxy_dict.get('proxy_type')
+                if isinstance(proxy_type_val, int) and PROXY_SUPPORT:
+                    # socks integer constant (e.g. socks.SOCKS5) → string name
+                    _int_ptype_map = {socks.SOCKS5: 'socks5', socks.SOCKS4: 'socks4', socks.HTTP: 'http'}
+                    ptype = _int_ptype_map.get(proxy_type_val, 'socks5')
+                else:
+                    ptype = (proxy_type_val or 'socks5').lower()
                 phost = proxy_dict.get('addr', '')
                 pport = proxy_dict.get('port', 1080)
                 puser = proxy_dict.get('username', '')
@@ -1597,16 +1603,19 @@ class PasskeyManager:
         print("[Passkey] 📦 打包登录结果文件...")
         output = []
         base_dir = tempfile.mkdtemp(prefix=f"passkey_login_{task_id}_")
+        web_zip_path = None
+        ses_zip_path = None
 
-        # ── 成功：生成 _web.json 和 _session.json 并打包 ─────────────────
+        # ── 成功：生成 _web.json、_session.json 和 .session 并打包 ─────────
         success_results = results.get('success', [])
         if success_results:
             count = len(success_results)
+            api_id, api_hash = self._get_api_credentials()
 
             # _web.json 文件打包
             web_zip_name = "passkey_web.zip"
             web_zip_path = os.path.join(base_dir, web_zip_name)
-            # _session.json 文件打包
+            # _session.json 和 .session 文件打包
             ses_zip_name = "passkey_sessions.zip"
             ses_zip_path = os.path.join(base_dir, ses_zip_name)
 
@@ -1632,19 +1641,42 @@ class PasskeyManager:
                         json.dumps(web_json_data, ensure_ascii=False, indent=2).encode('utf-8'),
                     )
 
-                    # _session.json
+                    # _session.json（包含 api_id 和 api_hash）
                     session_data = {
+                        "session_string": r.session_string,
                         "phone": r.phone,
                         "user_id": r.user_id,
                         "first_name": r.first_name,
                         "username": r.username,
+                        "api_id": api_id,
+                        "api_hash": api_hash,
                         "password_2fa": r.password_2fa,
-                        "session_string": r.session_string,
                     }
                     ses_zf.writestr(
                         f"{file_stem}_session.json",
                         json.dumps(session_data, ensure_ascii=False, indent=2).encode('utf-8'),
                     )
+
+                    # {phone}.session（Telethon SQLite session 文件，当 session_string 可用时）
+                    if r.session_string and TELETHON_AVAILABLE:
+                        try:
+                            from telethon.sessions import StringSession, SQLiteSession
+                            tmp_ses_base = os.path.join(base_dir, file_stem)
+                            str_session = StringSession(r.session_string)
+                            sq_session = SQLiteSession(tmp_ses_base)
+                            sq_session.set_dc(
+                                str_session.dc_id,
+                                str_session.server_address,
+                                str_session.port,
+                            )
+                            sq_session.auth_key = str_session.auth_key
+                            sq_session.save()
+                            sq_session.close()
+                            tmp_ses_file = tmp_ses_base + '.session'
+                            ses_zf.write(tmp_ses_file, arcname=f"{file_stem}.session")
+                            os.unlink(tmp_ses_file)
+                        except Exception as ses_err:
+                            logger.warning("[Passkey] 生成.session文件失败 %s: %s", file_stem, ses_err)
 
             for zip_path, zip_name, caption_prefix in [
                 (web_zip_path, web_zip_name, "✅ Web登录成功"),
