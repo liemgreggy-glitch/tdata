@@ -29273,11 +29273,16 @@ o5eth</code>
         """核心异步批量处理 Passkey"""
         import time as _time
 
+        logger.info(f"[Passkey] _execute_passkey_batch 启动 user_id={user_id}")
+        print(f"[Passkey] ▶ _execute_passkey_batch 启动 user_id={user_id}")
+
         # 懒初始化 PasskeyManager
         if self._passkey_manager is None:
             try:
                 from passkey_manager import PasskeyManager
                 self._passkey_manager = PasskeyManager(self.proxy_manager, self.db)
+                logger.info("[Passkey] PasskeyManager 初始化成功")
+                print("[Passkey] PasskeyManager 初始化成功")
             except Exception as e:
                 try:
                     context.bot.edit_message_text(
@@ -29334,10 +29339,13 @@ o5eth</code>
                     pass
 
         start = _time.time()
+        logger.info(f"[Passkey] 调用 batch_process: {len(files)} 个账号, 类型={file_type}")
+        print(f"[Passkey] 开始批量处理 {len(files)} 个账号...")
         results = await self._passkey_manager.batch_process(
             files, file_type, progress_callback=on_progress
         )
         elapsed = _time.time() - start
+        logger.info(f"[Passkey] batch_process 完成, 耗时 {round(elapsed, 1)}s")
 
         # 显示完成统计
         no_pk = len(results.get('no_passkey', []))
