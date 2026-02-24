@@ -14728,7 +14728,7 @@ class EnhancedBot:
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_api_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
 
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, task_id)
             if not files:
@@ -15071,7 +15071,7 @@ class EnhancedBot:
         progress_msg = self.safe_send_message(
             update,
             f"<b>{t(user_id, 'processing_file')}</b>",
-            'HTML'
+            parse_mode='HTML'
         )
         
         if not progress_msg:
@@ -15085,7 +15085,7 @@ class EnhancedBot:
             temp_dir = tempfile.mkdtemp(prefix="temp_download_")
             temp_zip = os.path.join(temp_dir, document.file_name)
             
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             print(f"📥 临时下载文件: {temp_zip}")
             
             # 扫描并正确保存文件
@@ -15356,7 +15356,7 @@ class EnhancedBot:
         progress_msg = self.safe_send_message(
             update,
             f"<b>{t(user_id, 'processing_your_file')}</b>",
-            'HTML'
+            parse_mode='HTML'
         )
         
         if not progress_msg:
@@ -15369,7 +15369,7 @@ class EnhancedBot:
             temp_dir = tempfile.mkdtemp(prefix="temp_conversion_")
             temp_zip = os.path.join(temp_dir, document.file_name)
             
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             print(f"📥 下载文件: {temp_zip}")
             
             # 扫描文件
@@ -15605,7 +15605,7 @@ class EnhancedBot:
             temp_dir = tempfile.mkdtemp(prefix="temp_2fa_")
             temp_zip = os.path.join(temp_dir, document.file_name)
             
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             print(f"📥 下载文件: {temp_zip}")
             
             # 扫描文件
@@ -16485,7 +16485,7 @@ class EnhancedBot:
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_forget2fa_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 使用FileProcessor扫描
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, task_id)
@@ -16710,7 +16710,7 @@ class EnhancedBot:
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_add_2fa_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 使用FileProcessor扫描
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, task_id)
@@ -17042,7 +17042,7 @@ class EnhancedBot:
         progress_msg = self.safe_send_message(
             update,
             f"<b>{t(user_id, 'delete_2fa_processing_file')}</b>",
-            'HTML'
+            parse_mode='HTML'
         )
         
         if not progress_msg:
@@ -17055,7 +17055,7 @@ class EnhancedBot:
             temp_dir = tempfile.mkdtemp(prefix="temp_remove_2fa_")
             temp_zip = os.path.join(temp_dir, document.file_name)
             
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             print(f"📥 下载文件: {temp_zip}")
             
             # 扫描文件
@@ -17441,7 +17441,7 @@ class EnhancedBot:
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_classify_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 使用FileProcessor扫描
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, task_id)
@@ -20906,7 +20906,7 @@ class EnhancedBot:
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="temp_cleanup_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 扫描ZIP文件
             task_id = f"{user_id}_{int(start_time)}"
@@ -22124,7 +22124,7 @@ class EnhancedBot:
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="batch_create_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 扫描文件 - 使用唯一任务ID，确保只提取当前上传的账号
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, unique_task_id)
@@ -23236,7 +23236,7 @@ admin3</code>
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="reauthorize_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 扫描文件
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, unique_task_id)
@@ -24938,7 +24938,7 @@ admin3</code>
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="registration_check_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 扫描文件
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, unique_task_id)
@@ -25034,7 +25034,7 @@ admin3</code>
             # 下载文件
             temp_dir = tempfile.mkdtemp(prefix="profile_update_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
             
             # 扫描文件
             files, extract_dir, file_type = self.processor.scan_zip_file(temp_zip, user_id, unique_task_id)
@@ -28458,7 +28458,7 @@ o5eth</code>
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_contact_check_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
         except Exception as e:
             self.safe_edit_message_text(progress_msg, f"❌ 文件下载失败: {e}")
             if temp_dir and os.path.exists(temp_dir):
@@ -29302,7 +29302,8 @@ o5eth</code>
         task_id = f"{user_id}_{int(start_time)}"
 
         progress_msg = self.safe_send_message(
-            update, f"📥 <b>{t(user_id, 'passkey_login_processing')}...</b>", 'HTML'
+            update, f"📥 <b>{t(user_id, 'passkey_login_processing')}...</b>",
+            parse_mode='HTML'
         )
         if not progress_msg:
             return
@@ -29312,7 +29313,7 @@ o5eth</code>
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_passkey_login_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
 
             # 解压并查找所有 .passkey 文件
             extract_dir = os.path.join(temp_dir, "extracted")
@@ -29398,7 +29399,7 @@ o5eth</code>
                 pass
 
             start = _time.time()
-            results = await self._passkey_manager.batch_login_from_passkeys(
+            results = await self._passkey_manager.batch_create_passkey(
                 passkey_files, progress_callback=on_progress
             )
             elapsed = _time.time() - start
@@ -29457,7 +29458,8 @@ o5eth</code>
         task_id = f"{user_id}_{int(start_time)}"
 
         progress_msg = self.safe_send_message(
-            update, f"📥 <b>{t(user_id, 'passkey_processing')}...</b>", 'HTML'
+            update, f"📥 <b>{t(user_id, 'passkey_processing')}...</b>",
+            parse_mode='HTML'
         )
         if not progress_msg:
             return
@@ -29468,7 +29470,7 @@ o5eth</code>
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_passkey_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
 
             files, extract_dir, file_type = self.processor.scan_zip_file(
                 temp_zip, user_id, task_id
@@ -29718,7 +29720,8 @@ o5eth</code>
         task_id = f"{user_id}_{int(start_time)}"
 
         progress_msg = self.safe_send_message(
-            update, f"📥 <b>{t(user_id, 'passkey_create_processing')}...</b>", 'HTML'
+            update, f"📥 <b>{t(user_id, 'passkey_create_processing')}...</b>",
+            parse_mode='HTML'
         )
         if not progress_msg:
             return
@@ -29729,7 +29732,7 @@ o5eth</code>
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_passkey_create_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            document.get_file().download(temp_zip)
+            context.bot.get_file(document.file_id).download(temp_zip)
 
             files, extract_dir, file_type = self.processor.scan_zip_file(
                 temp_zip, user_id, task_id
