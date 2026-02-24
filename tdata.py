@@ -8731,11 +8731,19 @@ def _afc_start_web_server(self):
             # 先推送当前已有的最新验证码（历史）
             latest = self.get_latest_verification_code(phone)
             last_sent_code = None
+            def _fmt_time(ts):
+                if not ts:
+                    return ''
+                try:
+                    return datetime.fromisoformat(ts).strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    return ts
+
             if latest and latest.get('code'):
                 last_sent_code = latest['code']
                 data = _json.dumps({
                     'code': latest['code'],
-                    'time': latest.get('received_at', '')
+                    'time': _fmt_time(latest.get('received_at', ''))
                 })
                 yield 'data: %s\n\n' % data
 
@@ -8751,7 +8759,7 @@ def _afc_start_web_server(self):
                         last_sent_code = current['code']
                         data = _json.dumps({
                             'code': current['code'],
-                            'time': current.get('received_at', '')
+                            'time': _fmt_time(current.get('received_at', ''))
                         })
                         yield 'data: %s\n\n' % data
                 except Exception:
