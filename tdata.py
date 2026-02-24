@@ -11504,7 +11504,7 @@ class EnhancedBot:
         只移除文件系统不允许的字符，保留所有Unicode字符包括Emoji。
         
         移除的字符（Windows和Unix文件系统不允许）:
-        - 反斜杠 (\)、正斜杠 (/)、冒号 (:)
+        - 反斜杠 (\\)、正斜杠 (/)、冒号 (:)
         - 星号 (*)、问号 (?)、引号 (")
         - 小于号 (<)、大于号 (>)、竖线 (|)
         
@@ -14414,6 +14414,7 @@ class EnhancedBot:
                 "waiting_cleanup_file",
                 "waiting_passkey_file",
                 "waiting_passkey_create_file",
+                "waiting_passkey_login_file",
                 "batch_create_upload",
                 "batch_create_names",
                 "batch_create_usernames",
