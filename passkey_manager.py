@@ -1069,6 +1069,10 @@ class PasskeyManager:
         """
         将创建 Passkey 的结果打包为 ZIP 文件。
 
+        成功创建的账号：每个账号生成一个 {手机号}.passkey 文件（JSON 格式），
+        所有 .passkey 文件统一打包到 passkey.zip。
+        失败账号：单独打包到 失败_{n}个_{task_id}.zip。
+
         返回: [(zip_path, filename, caption, size_bytes), ...]
         """
         logger.info("[Passkey] 开始打包创建结果文件 task_id=%s", task_id)
@@ -1076,54 +1080,65 @@ class PasskeyManager:
         output = []
         base_dir = tempfile.mkdtemp(prefix=f"passkey_create_{task_id}_")
 
-        categories = [
-            ('created', results.get('created', [])),
-            ('failed',  results.get('failed', [])),
-        ]
+        # ── 成功：生成 {phone}.passkey 文件并打包到 passkey.zip ──────────
+        created_results = results.get('created', [])
+        if created_results:
+            zip_name = "passkey.zip"
+            zip_path = os.path.join(base_dir, zip_name)
+            count = len(created_results)
 
-        label_map = {
-            'created': '已创建Passkey',
-            'failed':  '失败',
-        }
-        caption_map = {
-            'created': lambda n: f"✅ 已创建Passkey：{n} 个",
-            'failed':  lambda n: f"❌ 处理失败：{n} 个",
-        }
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for r in created_results:
+                    # 文件名：手机号优先，回退到账号名（去扩展名）
+                    phone = r.phone.strip() if r.phone else ""
+                    file_stem = phone if phone else os.path.splitext(r.account_name)[0]
+                    passkey_filename = f"{file_stem}.passkey"
 
-        for cat_key, cat_results in categories:
-            if not cat_results:
-                continue
+                    passkey_data = {
+                        "phone": r.phone,
+                        "account": r.account_name,
+                        "passkey_id": r.passkey_id,
+                        "passkey_name": r.passkey_name,
+                        "created_at": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    }
+                    zf.writestr(
+                        passkey_filename,
+                        json.dumps(passkey_data, ensure_ascii=False, indent=2).encode('utf-8'),
+                    )
 
-            label = label_map[cat_key]
-            count = len(cat_results)
-            zip_name = f"{label}_{count}个_{task_id}.zip"
+            size = os.path.getsize(zip_path)
+            caption = f"✅ 已创建Passkey：{count} 个"
+            logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
+            print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
+            output.append((zip_path, zip_name, caption, size))
+
+        # ── 失败：单独打包 ────────────────────────────────────────────────
+        failed_results = results.get('failed', [])
+        if failed_results:
+            count = len(failed_results)
+            zip_name = f"失败_{count}个_{task_id}.zip"
             zip_path = os.path.join(base_dir, zip_name)
 
-            # 构建报告文本
             report_lines = [
-                "Passkey 创建报告",
+                "Passkey 创建失败报告",
                 f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
                 f"账号数量: {count}",
                 "",
             ]
-            for r in cat_results:
+            for r in failed_results:
                 report_lines.append(f"账号: {r.account_name}")
                 if r.phone:
                     report_lines.append(f"  手机号: {r.phone}")
-                if cat_key == 'created':
-                    report_lines.append(f"  Passkey名称: {r.passkey_name}")
-                    report_lines.append(f"  Passkey ID: {r.passkey_id}")
-                else:
-                    report_lines.append(f"  错误: {r.error or '未知错误'}")
+                report_lines.append(f"  错误: {r.error or '未知错误'}")
                 report_lines.append("")
 
-            report_text = "\n".join(report_lines)
-
             with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("passkey_create_report.txt",
-                            report_text.encode('utf-8'))
+                zf.writestr(
+                    "passkey_create_report.txt",
+                    "\n".join(report_lines).encode('utf-8'),
+                )
                 # 写入账号原始文件
-                for r in cat_results:
+                for r in failed_results:
                     orig_path = None
                     for fp, fn in files:
                         base_fn = os.path.splitext(fn)[0]
@@ -1147,14 +1162,13 @@ class PasskeyManager:
                             zf.write(orig_path, arc_name)
                             json_path = orig_path.replace('.session', '.json')
                             if os.path.exists(json_path):
-                                zf.write(json_path,
-                                         os.path.basename(json_path))
+                                zf.write(json_path, os.path.basename(json_path))
 
             size = os.path.getsize(zip_path)
+            caption = f"❌ 处理失败：{count} 个"
             logger.info("[Passkey] 已生成ZIP: %s (%d bytes)", zip_name, size)
             print(f"[Passkey]   生成ZIP: {zip_name} ({size} bytes)")
-            output.append((zip_path, zip_name, caption_map[cat_key](count),
-                           size))
+            output.append((zip_path, zip_name, caption, size))
 
         logger.info("[Passkey] 打包完成，共 %d 个ZIP文件", len(output))
         print(f"[Passkey] 📦 打包完成，共 {len(output)} 个ZIP文件")
