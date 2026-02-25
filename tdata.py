@@ -14414,7 +14414,6 @@ class EnhancedBot:
                 "waiting_cleanup_file",
                 "waiting_passkey_file",
                 "waiting_passkey_create_file",
-                "waiting_passkey_login_file",
                 "batch_create_upload",
                 "batch_create_names",
                 "batch_create_usernames",
@@ -29400,7 +29399,7 @@ o5eth</code>
                 pass
 
             start = _time.time()
-            results = await self._passkey_manager.batch_login_from_passkeys(
+            results = await self._passkey_manager.batch_create_passkey(
                 passkey_files, progress_callback=on_progress
             )
             elapsed = _time.time() - start
