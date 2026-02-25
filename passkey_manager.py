@@ -1286,54 +1286,59 @@ class PasskeyManager:
             )
 
             # WebAuthn Hook JS：拦截 navigator.credentials.get()，用本地私钥签名
-            def _make_webauthn_hook(cred_id_b64: str, user_handle_b64: str) -> str:
-                return f"""
-(function() {{
-    const _origCreate = navigator.credentials.create.bind(navigator.credentials);
-    const _origGet    = navigator.credentials.get.bind(navigator.credentials);
+            hook_js = """
+(function() {
+    console.log('[Hook] Init');
+    window.__ch = null;
+    window.__res = null;
 
-    navigator.credentials.get = async function(options) {{
-        const pk = options && options.publicKey;
-        if (!pk) return _origGet(options);
+    const b64e = (b) => { let s=''; new Uint8Array(b).forEach(x=>s+=String.fromCharCode(x)); return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=/g,''); };
+    const b64d = (s) => { s+=('==').slice(0,(4-s.length%4)%4); return Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0)); };
 
-        const challengeB64 = btoa(String.fromCharCode(...new Uint8Array(pk.challenge)))
-            .replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');
+    Object.defineProperty(navigator, 'credentials', {
+        value: {
+            get: async function(o) {
+                console.log('[Hook] credentials.get called');
+                window.__ch = Array.from(new Uint8Array(o?.publicKey?.challenge));
+                return new Promise(r => window.__res = r);
+            },
+            create: async function(o) {
+                console.log('[Hook] credentials.create called');
+                return null;
+            }
+        },
+        writable: false,
+        configurable: false
+    });
 
-        // 通知 Python 注入 challenge
-        window.__webauthn_challenge__ = challengeB64;
+    window.inject = function(c, uh) {
+        if (!window.__res) { console.log('[Hook] No resolve'); return false; }
+        const uhBytes = b64d(uh);
+        console.log('[Hook] userHandle:', uh, uhBytes.length, 'bytes');
 
-        // 等待 Python 完成签名
-        const deadline = Date.now() + 30000;
-        while (!window.__webauthn_result__ && Date.now() < deadline) {{
-            await new Promise(r => setTimeout(r, 100));
-        }}
+        const resp = {
+            clientDataJSON: b64d(c.cdj).buffer,
+            authenticatorData: b64d(c.ad).buffer,
+            signature: b64d(c.sig).buffer,
+            userHandle: uhBytes.buffer,
+            toJSON: function() { return { clientDataJSON:c.cdj, authenticatorData:c.ad, signature:c.sig, userHandle:uh }; }
+        };
+        const cred = {
+            id: c.id,
+            rawId: b64d(c.id).buffer,
+            type: "public-key",
+            authenticatorAttachment: "platform",
+            response: resp,
+            getClientExtensionResults: function() { return {}; },
+            toJSON: function() { return { id:c.id, rawId:c.id, type:"public-key", authenticatorAttachment:"platform", response:resp.toJSON(), clientExtensionResults:{} }; }
+        };
+        window.__res(cred);
+        console.log('[Hook] Injected OK');
+        return true;
+    };
 
-        if (!window.__webauthn_result__) {{
-            throw new Error('WebAuthn hook: sign timeout');
-        }}
-
-        const r = window.__webauthn_result__;
-        window.__webauthn_result__ = null;
-
-        function b64ToArr(b64) {{
-            const s = atob(b64.replace(/-/g,'+').replace(/_/g,'/'));
-            return Uint8Array.from(s, c => c.charCodeAt(0));
-        }}
-
-        return {{
-            id: r.id,
-            rawId: b64ToArr(r.rawId).buffer,
-            type: 'public-key',
-            response: {{
-                clientDataJSON:    b64ToArr(r.clientDataJSON).buffer,
-                authenticatorData: b64ToArr(r.authenticatorData).buffer,
-                signature:         b64ToArr(r.signature).buffer,
-                userHandle:        r.userHandle ? b64ToArr(r.userHandle).buffer : null,
-            }},
-            getClientExtensionResults: () => ({{}}),
-        }};
-    }};
-}})();
+    console.log('[Hook] Ready');
+})();
 """
 
             proxy_dict = self._get_proxy()
@@ -1358,10 +1363,12 @@ class PasskeyManager:
                 if ppass:
                     playwright_proxy['password'] = ppass
 
-            hook_js = _make_webauthn_hook(passkey_id, user_handle)
-
             async with async_playwright() as pw:
-                launch_kwargs = {'headless': True}
+                launch_kwargs = {
+                    'headless': True,
+                    'executable_path': '/usr/bin/google-chrome-stable',
+                    'args': ['--no-sandbox'],
+                }
                 if playwright_proxy:
                     launch_kwargs['proxy'] = playwright_proxy
 
@@ -1373,35 +1380,33 @@ class PasskeyManager:
 
                 page = await context.new_page()
                 await page.goto('https://web.telegram.org/a/', timeout=60000)
+                await asyncio.sleep(6)  # 等待页面完全加载
 
                 # 等待并点击 PASSKEY 按钮（Sign in with a Passkey）
-                try:
-                    passkey_btn = page.locator('button:has-text("PASSKEY"), button:has-text("Passkey"), [data-passkey], .btn-passkey')
-                    await passkey_btn.first.wait_for(timeout=30000)
-                    await passkey_btn.first.click()
-                except Exception:
-                    # 备用：查找包含 passkey 文字的可点击元素
-                    try:
-                        await page.click('text=PASSKEY', timeout=15000)
-                    except Exception:
-                        await page.click('text=Passkey', timeout=15000)
+                btn = page.locator("button:has-text('PASSKEY')")
+                if await btn.count() > 0:
+                    await btn.click()
+                else:
+                    result['error'] = '等待 Passkey 按钮超时'
+                    await browser.close()
+                    return result
 
                 # 等待 JS Hook 捕获到 challenge
-                challenge_b64 = None
-                for _ in range(300):  # 最多等待 30 秒
-                    val = await page.evaluate('window.__webauthn_challenge__')
-                    if val:
-                        challenge_b64 = val
+                ch = None
+                for i in range(20):
+                    ch = await page.evaluate("window.__ch")
+                    if ch:
                         break
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.5)
 
-                if not challenge_b64:
-                    result['error'] = '等待 WebAuthn challenge 超时'
+                if not ch:
+                    result['error'] = '无法获取 WebAuthn challenge'
                     await browser.close()
                     return result
 
                 # 用私钥签名 challenge
-                challenge_bytes = _b64url_decode(challenge_b64)
+                challenge_bytes = bytes(ch)
+                challenge_b64 = _b64url_encode(challenge_bytes)
                 rp_id = 'telegram.org'
                 origin = 'https://web.telegram.org'
 
@@ -1419,25 +1424,22 @@ class PasskeyManager:
                 signed_data = auth_data + client_data_hash
                 signature_der = private_key.sign(signed_data, ec.ECDSA(hashes.SHA256()))
 
-                webauthn_result = {
-                    'id': passkey_id,
-                    'rawId': passkey_id,
-                    'clientDataJSON': _b64url_encode(client_data_json),
-                    'authenticatorData': _b64url_encode(auth_data),
-                    'signature': _b64url_encode(signature_der),
-                    'userHandle': user_handle if user_handle else None,
-                }
-                await page.evaluate(f'window.__webauthn_result__ = {json.dumps(webauthn_result)}')
+                cd = _b64url_encode(client_data_json)
+                ad = _b64url_encode(auth_data)
+                sig = _b64url_encode(signature_der)
+                inject_result = await page.evaluate(
+                    f"window.inject({{id:'{passkey_id}',cdj:'{cd}',ad:'{ad}',sig:'{sig}'}}, '{user_handle}')"
+                )
 
                 # 等待 2FA 输入框（如需）
-                if password_2fa:
-                    try:
-                        pwd_input = page.locator('input[type=password], input.password-input, .input-field-password input')
-                        await pwd_input.first.wait_for(timeout=15000)
-                        await pwd_input.first.fill(password_2fa)
-                        await page.keyboard.press('Enter')
-                    except Exception:
-                        pass
+                text = await page.inner_text('body')
+                if 'password' in text.lower() or 'two-step' in text.lower():
+                    if password_2fa:
+                        pwd_input = page.locator('input[type="password"]')
+                        if await pwd_input.count() > 0:
+                            await pwd_input.fill(password_2fa)
+                            await page.keyboard.press('Enter')
+                            await asyncio.sleep(5)
 
                 # 等待登录成功（出现主界面元素）
                 try:
