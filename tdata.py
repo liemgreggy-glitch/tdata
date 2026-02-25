@@ -29298,6 +29298,9 @@ o5eth</code>
 
     async def process_passkey_login_upload(self, update, context, document):
         """处理用户上传的 Passkey 登录 ZIP 文件，执行批量登录"""
+        from passkey_manager import PasskeyLoginManager
+        import json as _json
+
         user_id = update.effective_user.id
         start_time = time.time()
         task_id = f"{user_id}_{int(start_time)}"
@@ -29314,9 +29317,10 @@ o5eth</code>
         try:
             temp_dir = tempfile.mkdtemp(prefix="temp_passkey_login_")
             temp_zip = os.path.join(temp_dir, document.file_name)
-            context.bot.get_file(document.file_id).download(temp_zip)
+            file_obj = await context.bot.get_file(document.file_id)
+            await file_obj.download_to_drive(temp_zip)
 
-            # 解压并查找所有 .passkey 文件
+            # 解压并查找所有合法的 .passkey / .json 文件
             extract_dir = os.path.join(temp_dir, "extracted")
             os.makedirs(extract_dir, exist_ok=True)
             with zipfile.ZipFile(temp_zip, 'r') as zf:
@@ -29325,10 +29329,16 @@ o5eth</code>
             passkey_files = []
             for root, dirs, fnames in os.walk(extract_dir):
                 for fname in fnames:
-                    if fname.endswith('.passkey'):
-                        passkey_files.append(
-                            (os.path.join(root, fname), fname)
-                        )
+                    if not (fname.endswith('.passkey') or fname.endswith('.json')):
+                        continue
+                    full_path = os.path.join(root, fname)
+                    try:
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            data = _json.load(f)
+                        if 'passkey_id' in data and 'private_key_pem' in data:
+                            passkey_files.append(full_path)
+                    except Exception:
+                        pass
 
             if not passkey_files:
                 try:
@@ -29342,25 +29352,8 @@ o5eth</code>
 
             total = len(passkey_files)
 
-            # 懒初始化 PasskeyManager
-            if self._passkey_manager is None:
-                try:
-                    from passkey_manager import PasskeyManager
-                    self._passkey_manager = PasskeyManager(self.proxy_manager, self.db)
-                except Exception as e:
-                    try:
-                        progress_msg.edit_text(
-                            f"❌ <b>PasskeyManager 初始化失败</b>\n\n{str(e)}",
-                            parse_mode='HTML'
-                        )
-                    except Exception:
-                        pass
-                    return
-
-            import time as _time
-
             stats = {'success': 0, 'failed': 0}
-            last_update_time = _time.time()
+            last_update_time = [time.time()]
             UPDATE_INTERVAL = 5
 
             def make_progress_text(done, total, stats):
@@ -29375,14 +29368,13 @@ o5eth</code>
                 )
 
             async def on_progress(done, total, result):
-                nonlocal last_update_time
-                if result.status == 'success':
+                if result.success:
                     stats['success'] += 1
                 else:
                     stats['failed'] += 1
-                now = _time.time()
-                if now - last_update_time >= UPDATE_INTERVAL or done == total:
-                    last_update_time = now
+                now = time.time()
+                if now - last_update_time[0] >= UPDATE_INTERVAL or done == total:
+                    last_update_time[0] = now
                     try:
                         progress_msg.edit_text(
                             make_progress_text(done, total, stats),
@@ -29399,11 +29391,15 @@ o5eth</code>
             except Exception:
                 pass
 
-            start = _time.time()
-            results = await self._passkey_manager.batch_login_from_passkeys(
-                passkey_files, progress_callback=on_progress
+            output_dir = os.path.join(temp_dir, 'sessions')
+            os.makedirs(output_dir, exist_ok=True)
+            login_manager = PasskeyLoginManager(output_dir=output_dir)
+
+            results = await login_manager.batch_login(
+                passkey_files=passkey_files,
+                progress_callback=on_progress,
+                concurrent=login_manager.DEFAULT_CONCURRENT,
             )
-            elapsed = _time.time() - start
 
             success_count = len(results.get('success', []))
             failed_count = len(results.get('failed', []))
@@ -29421,13 +29417,11 @@ o5eth</code>
 
             # 打包并发送结果文件
             try:
-                result_files = self._passkey_manager.create_result_files_for_login(
-                    results, task_id
-                )
+                result_files = login_manager.create_result_zip(results, task_id)
                 for zip_path, zip_name, caption, size in result_files:
                     try:
                         with open(zip_path, 'rb') as f:
-                            context.bot.send_document(
+                            await context.bot.send_document(
                                 chat_id=update.effective_chat.id,
                                 document=f,
                                 filename=zip_name,

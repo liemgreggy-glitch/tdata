@@ -8,14 +8,22 @@ Passkey（通行密钥）批量检测与删除管理器
 """
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
 import os
 import shutil
+import struct
 import tempfile
 import time
 import zipfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.backends import default_backend
 
 logger = logging.getLogger(__name__)
 
@@ -721,4 +729,410 @@ class PasskeyManager:
 
         logger.info(f"[Passkey] 打包完成，共 {len(output)} 个ZIP文件")
         print(f"[Passkey] 📦 打包完成，共 {len(output)} 个ZIP文件")
+        return output
+
+
+# ---------------------------------------------------------------------------
+# Passkey 登录结果
+# ---------------------------------------------------------------------------
+@dataclass
+class PasskeyLoginResult:
+    passkey_file: str           # .passkey 文件名
+    phone: str = ""
+    success: bool = False
+    session_path: Optional[str] = None   # 登录成功后导出的 session 文件路径
+    error: Optional[str] = None
+    elapsed: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Passkey 登录管理器（基于 Playwright WebAuthn Hook）
+# ---------------------------------------------------------------------------
+class PasskeyLoginManager:
+    """
+    使用 .passkey 文件（含 passkey_id / private_key_pem / user_handle）
+    通过 Playwright 模拟 WebAuthn，完成 Telegram Web 登录，导出 localStorage session。
+
+    .passkey 文件 JSON 格式：
+    {
+        "passkey_id": "...",
+        "private_key_pem": "-----BEGIN EC PRIVATE KEY-----\\n...",
+        "user_handle": "...",      # base64url 编码
+        "phone": "+86...",         # 可选，用于命名输出文件
+        "password": "..."          # 可选，2FA 密码
+    }
+    """
+
+    LOGIN_TIMEOUT = 120          # 单账号整体超时（秒）
+    DEFAULT_CONCURRENT = 3       # 默认并发数（每个登录开一个 Chrome 实例）
+    CHROME_PATH = '/usr/bin/google-chrome-stable'
+
+    # JS hook 脚本，注入到浏览器页面，劫持 navigator.credentials.get
+    _WEBAUTHN_HOOK_SCRIPT = """
+        (function() {
+            window.__ch = null;
+            window.__res = null;
+
+            const b64d = (s) => {
+                s += ('==').slice(0, (4 - s.length % 4) % 4);
+                return Uint8Array.from(
+                    atob(s.replace(/-/g, '+').replace(/_/g, '/')),
+                    c => c.charCodeAt(0)
+                );
+            };
+
+            Object.defineProperty(navigator, 'credentials', {
+                value: {
+                    get: async function(o) {
+                        window.__ch = Array.from(new Uint8Array(o?.publicKey?.challenge));
+                        return new Promise(r => window.__res = r);
+                    },
+                    create: async function(o) { return null; }
+                },
+                writable: false,
+                configurable: false
+            });
+
+            window.inject = function(c, uh) {
+                if (!window.__res) return false;
+                const uhBytes = b64d(uh);
+                const resp = {
+                    clientDataJSON: b64d(c.cdj).buffer,
+                    authenticatorData: b64d(c.ad).buffer,
+                    signature: b64d(c.sig).buffer,
+                    userHandle: uhBytes.buffer,
+                    toJSON: function() {
+                        return {
+                            clientDataJSON: c.cdj,
+                            authenticatorData: c.ad,
+                            signature: c.sig,
+                            userHandle: uh
+                        };
+                    }
+                };
+                const cred = {
+                    id: c.id,
+                    rawId: b64d(c.id).buffer,
+                    type: 'public-key',
+                    authenticatorAttachment: 'platform',
+                    response: resp,
+                    getClientExtensionResults: function() { return {}; },
+                    toJSON: function() {
+                        return {
+                            id: c.id, rawId: c.id, type: 'public-key',
+                            authenticatorAttachment: 'platform',
+                            response: resp.toJSON(),
+                            clientExtensionResults: {}
+                        };
+                    }
+                };
+                window.__res(cred);
+                return true;
+            };
+        })();
+    """
+
+    def __init__(self, output_dir: str = None):
+        self.output_dir = output_dir or tempfile.mkdtemp(prefix='passkey_login_out_')
+
+    @staticmethod
+    def _b64url_encode(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+
+    # ------------------------------------------------------------------
+    # 公共接口：批量登录
+    # ------------------------------------------------------------------
+    async def batch_login(
+        self,
+        passkey_files: List[str],
+        progress_callback=None,
+        concurrent: int = DEFAULT_CONCURRENT,
+    ) -> Dict[str, List['PasskeyLoginResult']]:
+        """批量登录，返回 {'success': [...], 'failed': [...]}"""
+        total = len(passkey_files)
+        logger.info(f"[PasskeyLogin] 批量登录开始: 共 {total} 个文件, 并发={concurrent}")
+        print(f"[PasskeyLogin] ▶ 批量登录: {total} 个 | 并发={concurrent}")
+
+        semaphore = asyncio.Semaphore(concurrent)
+        results: List[PasskeyLoginResult] = []
+        done_count = 0
+
+        async def _process_with_sem(pk_path: str):
+            nonlocal done_count
+            async with semaphore:
+                result = await self._login_one(pk_path)
+                results.append(result)
+                done_count += 1
+                icon = '✅' if result.success else '❌'
+                msg = f"[PasskeyLogin] {icon} [{done_count}/{total}] {result.passkey_file}"
+                if result.phone:
+                    msg += f" phone={result.phone}"
+                if result.error:
+                    msg += f" | 错误: {result.error}"
+                print(msg)
+                if progress_callback:
+                    try:
+                        await progress_callback(done_count, total, result)
+                    except Exception as e:
+                        logger.warning(f"[PasskeyLogin] 进度回调异常: {e}")
+
+        tasks = [asyncio.create_task(_process_with_sem(p)) for p in passkey_files]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        categorized: Dict[str, List[PasskeyLoginResult]] = {'success': [], 'failed': []}
+        for r in results:
+            categorized['success' if r.success else 'failed'].append(r)
+
+        ok = len(categorized['success'])
+        fail = len(categorized['failed'])
+        logger.info(f"[PasskeyLogin] 完成: 成功={ok}, 失败={fail}")
+        print(f"[PasskeyLogin] ■ 完成: ✅成功={ok} | ❌失败={fail}")
+        return categorized
+
+    # ------------------------------------------------------------------
+    # 内部：单账号登录（带整体超时）
+    # ------------------------------------------------------------------
+    async def _login_one(self, passkey_file_path: str) -> 'PasskeyLoginResult':
+        file_name = os.path.basename(passkey_file_path)
+        result = PasskeyLoginResult(passkey_file=file_name)
+        start = time.time()
+        try:
+            result = await asyncio.wait_for(
+                self._login_one_inner(passkey_file_path),
+                timeout=self.LOGIN_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            result.error = f'登录超时({self.LOGIN_TIMEOUT}s)'
+            result.passkey_file = file_name
+            logger.error(f"[PasskeyLogin] {file_name} 整体超时")
+        except Exception as e:
+            result.error = str(e)
+            result.passkey_file = file_name
+            logger.error(f"[PasskeyLogin] {file_name} 异常: {e}", exc_info=True)
+        result.elapsed = time.time() - start
+        return result
+
+    async def _login_one_inner(self, passkey_file_path: str) -> 'PasskeyLoginResult':
+        file_name = os.path.basename(passkey_file_path)
+        result = PasskeyLoginResult(passkey_file=file_name)
+
+        # 读取 .passkey 文件
+        with open(passkey_file_path, 'r', encoding='utf-8') as f:
+            pk = json.load(f)
+
+        passkey_id = pk['passkey_id']
+        private_key_pem = pk['private_key_pem']
+        user_handle = pk.get('user_handle', '')
+        phone = pk.get('phone', '')
+        password_2fa = pk.get('password', pk.get('two_fa_password', None))
+
+        result.phone = phone
+
+        if not user_handle:
+            result.error = '缺少 user_handle 字段'
+            return result
+
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            result.error = 'playwright 未安装，请运行: pip install playwright && playwright install chromium'
+            return result
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                executable_path=self.CHROME_PATH,
+                args=['--no-sandbox', '--disable-dev-shm-usage'],
+            )
+            context = await browser.new_context()
+            await context.add_init_script(self._WEBAUTHN_HOOK_SCRIPT)
+            page = await context.new_page()
+
+            try:
+                # 1. 访问 Telegram Web
+                logger.info(f"[PasskeyLogin] {file_name}: 访问 Telegram Web...")
+                await page.goto('https://web.telegram.org/a/', timeout=60000)
+                await asyncio.sleep(6)
+
+                # 2. 点击 PASSKEY 按钮
+                btn = page.locator("button:has-text('PASSKEY'), button:has-text('Passkey')")
+                if await btn.count() == 0:
+                    result.error = '找不到 PASSKEY 按钮，页面可能未显示登录界面'
+                    return result
+                await btn.first.click()
+                logger.info(f"[PasskeyLogin] {file_name}: 已点击 PASSKEY 按钮")
+                await asyncio.sleep(3)
+
+                # 3. 等待 challenge
+                ch = None
+                for _ in range(20):
+                    ch = await page.evaluate("window.__ch")
+                    if ch:
+                        break
+                    await asyncio.sleep(0.5)
+
+                if not ch:
+                    result.error = '未收到 WebAuthn challenge'
+                    return result
+
+                logger.info(f"[PasskeyLogin] {file_name}: 收到 challenge ({len(ch)} bytes)")
+
+                # 4. 签名（与 pass.py 完全一致）
+                pkey = serialization.load_pem_private_key(
+                    private_key_pem.encode(), None, default_backend()
+                )
+                cd = json.dumps(
+                    {
+                        "type": "webauthn.get",
+                        "challenge": self._b64url_encode(bytes(ch)),
+                        "origin": "https://web.telegram.org",
+                        "crossOrigin": False,
+                    },
+                    separators=(',', ':')
+                ).encode()
+                ad = hashlib.sha256(b"telegram.org").digest() + b'\x05' + struct.pack('>I', 1)
+                sig = pkey.sign(ad + hashlib.sha256(cd).digest(), ec.ECDSA(hashes.SHA256()))
+
+                # 5. 注入凭证
+                inject_ok = await page.evaluate(
+                    f"window.inject({{id:'{passkey_id}',"
+                    f"cdj:'{self._b64url_encode(cd)}',"
+                    f"ad:'{self._b64url_encode(ad)}',"
+                    f"sig:'{self._b64url_encode(sig)}'}},"
+                    f"'{user_handle}')"
+                )
+                if not inject_ok:
+                    result.error = '凭证注入失败（inject 返回 false）'
+                    return result
+
+                logger.info(f"[PasskeyLogin] {file_name}: 凭证注入成功，等待响应...")
+
+                # 6. 等待响应
+                await asyncio.sleep(5)
+                text = await page.inner_text('body')
+                content = await page.content()
+
+                # 7. 处理 2FA（与 pass.py 完全一致）
+                if 'password' in text.lower() or 'two-step' in text.lower():
+                    logger.info(f"[PasskeyLogin] {file_name}: Passkey 验证成功，需要 2FA")
+                    if password_2fa:
+                        pwd_input = page.locator('input[type="password"]')
+                        if await pwd_input.count() > 0:
+                            await pwd_input.fill(password_2fa)
+                            await page.keyboard.press('Enter')
+                            await asyncio.sleep(5)
+                            content = await page.content()
+                        else:
+                            result.error = '2FA 输入框未找到'
+                            return result
+                    else:
+                        result.error = 'Passkey 验证成功但需要 2FA，.passkey 文件中缺少 password 字段'
+                        return result
+
+                # 8. 判断登录成功
+                if 'ChatList' in content or 'LeftColumn' in content or 'chat-list' in content:
+                    logger.info(f"[PasskeyLogin] {file_name}: 登录成功，导出 session...")
+                    result.success = True
+
+                    # 9. 导出 localStorage 为 session 文件
+                    safe_name = (phone.replace('+', '') if phone else passkey_id[:20]).replace('/', '_')
+                    session_out = os.path.join(self.output_dir, f"{safe_name}_passkey.json")
+                    try:
+                        ls_data = await page.evaluate("""
+                            () => {
+                                const d = {};
+                                for (let i = 0; i < localStorage.length; i++) {
+                                    const k = localStorage.key(i);
+                                    d[k] = localStorage.getItem(k);
+                                }
+                                return d;
+                            }
+                        """)
+                        session_info = {
+                            'phone': phone,
+                            'passkey_id': passkey_id,
+                            'login_method': 'passkey',
+                            'local_storage': ls_data,
+                        }
+                        with open(session_out, 'w', encoding='utf-8') as sf:
+                            json.dump(session_info, sf, ensure_ascii=False, indent=2)
+                        result.session_path = session_out
+                        logger.info(f"[PasskeyLogin] {file_name}: session 已导出 => {session_out}")
+                    except Exception as export_err:
+                        logger.warning(f"[PasskeyLogin] {file_name}: session 导出异常: {export_err}")
+                        # 降级：截图
+                        screenshot_path = os.path.join(self.output_dir, f"{safe_name}_success.png")
+                        await page.screenshot(path=screenshot_path)
+                        result.session_path = screenshot_path
+                else:
+                    result.error = f'登录后页面未识别到聊天界面，页面片段: {text[:150]}'
+                    logger.warning(f"[PasskeyLogin] {file_name}: 登录结果未识别")
+
+            finally:
+                await browser.close()
+
+        return result
+
+    # ------------------------------------------------------------------
+    # 结果文件打包
+    # ------------------------------------------------------------------
+    def create_result_zip(
+        self,
+        results: Dict[str, List['PasskeyLoginResult']],
+        task_id: str,
+    ) -> List[Tuple[str, str, str, int]]:
+        """打包登录结果为 ZIP，返回 [(zip_path, filename, caption, size_bytes)]"""
+        output = []
+        base_dir = tempfile.mkdtemp(prefix=f"passkey_login_result_{task_id}_")
+
+        success_list = results.get('success', [])
+        failed_list = results.get('failed', [])
+
+        if success_list:
+            count = len(success_list)
+            zip_name = f"PasskeyLogin_Session_{count}个.zip"
+            zip_path = os.path.join(base_dir, zip_name)
+            report_lines = [
+                "Passkey 登录报告",
+                f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"成功登录: {count}", "",
+            ]
+            for r in success_list:
+                report_lines += [f"文件: {r.passkey_file}"]
+                if r.phone:
+                    report_lines.append(f"  手机号: {r.phone}")
+                report_lines += [f"  用时: {r.elapsed:.1f}s", ""]
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("passkey_login_report.txt", "\n".join(report_lines).encode('utf-8'))
+                for r in success_list:
+                    if r.session_path and os.path.exists(r.session_path):
+                        zf.write(r.session_path, os.path.basename(r.session_path))
+
+            size = os.path.getsize(zip_path)
+            output.append((zip_path, zip_name, f"✅ Passkey 登录成功：{count} 个", size))
+            logger.info(f"[PasskeyLogin] 生成成功ZIP: {zip_name} ({size} bytes)")
+
+        if failed_list:
+            count = len(failed_list)
+            zip_name = f"PasskeyLogin_失败_{count}个.zip"
+            zip_path = os.path.join(base_dir, zip_name)
+            report_lines = [
+                "Passkey 登录失败报告",
+                f"生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"失败数量: {count}", "",
+            ]
+            for r in failed_list:
+                report_lines += [f"文件: {r.passkey_file}"]
+                if r.phone:
+                    report_lines.append(f"  手机号: {r.phone}")
+                report_lines += [f"  错误: {r.error or '未知错误'}", ""]
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("passkey_login_failed_report.txt", "\n".join(report_lines).encode('utf-8'))
+
+            size = os.path.getsize(zip_path)
+            output.append((zip_path, zip_name, f"❌ 登录失败：{count} 个", size))
+            logger.info(f"[PasskeyLogin] 生成失败ZIP: {zip_name} ({size} bytes)")
+
         return output
